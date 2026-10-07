@@ -151,3 +151,96 @@ class TelegramNotifier:
         except Exception as e:
             logger.warning("Failed to send Telegram message: %s", e)
             return False
+
+    def send_settlement_report(
+        self,
+        target_date: str,
+        summary: dict,
+        settled_rows: List[dict],
+        historical_stats: Optional[dict] = None,
+    ) -> bool:
+        """Formats and transmits the daily settlement report via Telegram."""
+        won = summary.get("won", 0)
+        lost = summary.get("lost", 0)
+        push = summary.get("push", 0)
+        total_pnl = summary.get("total_pnl", 0.0)
+        roi = summary.get("roi_percent", 0.0)
+        total_bets = won + lost + push
+        winrate = (won / (won + lost) * 100.0) if (won + lost) > 0 else 0.0
+
+        pnl_symbol = "🟢 +" if total_pnl >= 0 else "🔴 "
+
+        lines = [
+            "📊 *NBA QUANT ENGINE - LIQUIDACIÓN DE RESULTADOS*",
+            f"📅 *Fecha:* `{target_date}`",
+            "─────────────────────────────",
+            f"🏆 *Récord del Día:* `{won}W - {lost}L - {push}P`",
+            f"🎯 *Winrate Real:* `{winrate:.1f}%`",
+            f"💰 *PnL Neto:* *{pnl_symbol}${abs(total_pnl):.2f}*",
+            f"📈 *ROI del Día:* *{roi:+.2f}%*",
+            "─────────────────────────────",
+            "*Detalle de Posiciones:*",
+        ]
+
+        for row in settled_rows:
+            res = row.get("result", "PENDING")
+            sel = row.get("selection", "")
+            pnl_val = float(row.get("pnl", 0.0))
+            bet_type = row.get("bet_type", "CORE_STRAIGHT")
+            curr = "USD" if bet_type == "CORE_STRAIGHT" else "MXN"
+
+            icon = "✅" if res == "WON" else ("❌" if res == "LOST" else "⚪")
+            pnl_str = f"+${pnl_val:.2f} {curr}" if pnl_val > 0 else (f"-${abs(pnl_val):.2f} {curr}" if pnl_val < 0 else f"$0.00 {curr}")
+
+            lines.append(f"  {icon} *{sel}*: `{pnl_str}` ({res})")
+
+        if historical_stats:
+            h_won = historical_stats.get("won", 0)
+            h_lost = historical_stats.get("lost", 0)
+            h_push = historical_stats.get("push", 0)
+            h_pnl = historical_stats.get("total_pnl", 0.0)
+            h_roi = historical_stats.get("roi_percent", 0.0)
+            h_wr = (h_won / (h_won + h_lost) * 100.0) if (h_won + h_lost) > 0 else 0.0
+            h_symbol = "🟢 +" if h_pnl >= 0 else "🔴 "
+
+            lines.extend([
+                "─────────────────────────────",
+                "🏦 *Métricas Históricas Acumuladas:*",
+                f"• Récord Global: `{h_won}W - {h_lost}L - {h_push}P` ({h_wr:.1f}%)",
+                f"• PnL Acumulado: *{h_symbol}${abs(h_pnl):.2f}*",
+                f"• ROI Acumulado: *{h_roi:+.2f}%*",
+            ])
+
+        lines.append("─────────────────────────────")
+        lines.append("🤖 _Liquidación automatizada vía settle_nba.py_\n")
+
+        message_text = "\n".join(lines)
+
+        # Print to console
+        clean_text = message_text.replace("*", "").replace("`", "").replace("_", "")
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8")
+            print(clean_text)
+        except Exception:
+            print(clean_text.encode("ascii", errors="replace").decode("ascii"))
+
+        if not self.bot_token or not self.chat_id:
+            logger.info("Telegram credentials not configured. Settlement report printed to console.")
+            return False
+
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            payload = {
+                "chat_id": self.chat_id,
+                "text": message_text,
+                "parse_mode": "Markdown",
+            }
+            res = requests.post(url, json=payload, timeout=8)
+            res.raise_for_status()
+            logger.info("Settlement report sent to Telegram successfully.")
+            return True
+        except Exception as e:
+            logger.warning("Failed to send settlement report to Telegram: %s", e)
+            return False
+

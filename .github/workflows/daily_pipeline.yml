@@ -1,0 +1,68 @@
+name: NBA Daily Quantitative & Trading Pipeline
+
+on:
+  workflow_dispatch: # Permite ejecución manual desde la pestaña Actions en GitHub y vía API de cron-job.org
+  repository_dispatch: # Permite webhook POST de cron-job.org
+    types: [run-pipeline]
+  schedule:
+    # Ejecución automática: 17:00 UTC (11:00 AM CDMX)
+    - cron: '0 17 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🧪 Ejecutar pruebas unitarias de sanidad
+        run: |
+          python -m pytest tests/ -v
+
+      - name: 📊 Liquidar resultados de la jornada anterior (Paper Trading)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BANKROLL_CORE: ${{ secrets.BANKROLL_CORE || '1000.0' }}
+          WEEKLY_FUN_BUDGET: ${{ secrets.WEEKLY_FUN_BUDGET || '150.0' }}
+        run: |
+          python settle_nba.py
+
+      - name: 🎯 Escanear valor (+EV) y generar picks para hoy (Core & Parlay Draftea)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_REGION: ${{ secrets.ODDS_API_REGION || 'us' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BANKROLL_CORE: ${{ secrets.BANKROLL_CORE || '1000.0' }}
+          WEEKLY_FUN_BUDGET: ${{ secrets.WEEKLY_FUN_BUDGET || '150.0' }}
+        run: |
+          python main.py
+
+      - name: 💾 Guardar y hacer push del historial actualizado
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/history/ data/cache/
+          if git diff --staged --quiet; then
+            echo "No hay cambios en el historial para commitear."
+          else
+            git commit -m "chore(history): actualizar picks y liquidaciones diarias [skip ci]"
+            git push
+          fi
