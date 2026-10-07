@@ -2,6 +2,7 @@
 Notifier Module for NBA Quant Engine.
 Formats and transmits structured alerts to Telegram with differentiated visual formats
 for Core Quant (+EV) and Satellite Parlay (Draftea/Fun).
+Includes automatic message chunking (<= 4096 chars) and Markdown-to-plain-text fallback.
 """
 
 from __future__ import annotations
@@ -19,6 +20,34 @@ from src.models.parlay_builder import ParlayTicket
 logger = logging.getLogger(__name__)
 
 
+def split_telegram_message(text: str, max_chars: int = 3800) -> List[str]:
+    """
+    Splits a long message into chunks respecting line breaks
+    to satisfy Telegram's strict 4096-character limit per message.
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: List[str] = []
+    lines = text.split("\n")
+    current_chunk: List[str] = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1  # includes newline
+        if current_len + line_len > max_chars and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = []
+            current_len = 0
+        current_chunk.append(line)
+        current_len += line_len
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    return chunks
+
+
 class TelegramNotifier:
     """Formats and sends trading signals via Telegram Bot API or CLI console."""
 
@@ -27,16 +56,62 @@ class TelegramNotifier:
         bot_token: Optional[str] = None,
         chat_id: Optional[str] = None,
     ) -> None:
-        self.bot_token = bot_token or config.TELEGRAM_BOT_TOKEN
-        self.chat_id = chat_id or config.TELEGRAM_CHAT_ID
+        self.bot_token = (bot_token or config.TELEGRAM_BOT_TOKEN or "").strip()
+        self.chat_id = (chat_id or config.TELEGRAM_CHAT_ID or "").strip()
+
+    def _send_text(self, text: str) -> bool:
+        """
+        Sends text via Telegram Bot API with automatic chunking and Markdown-to-plain-text fallback.
+        """
+        if not self.bot_token or not self.chat_id:
+            logger.info("Telegram credentials not configured. Notification not sent.")
+            return False
+
+        chunks = split_telegram_message(text, max_chars=3800)
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        all_success = True
+
+        for i, chunk in enumerate(chunks, start=1):
+            payload = {
+                "chat_id": self.chat_id,
+                "text": chunk,
+                "parse_mode": "Markdown",
+            }
+            try:
+                res = requests.post(url, json=payload, timeout=12)
+                if res.status_code == 200:
+                    logger.info("Telegram message chunk %d/%d sent successfully.", i, len(chunks))
+                    continue
+
+                # If Markdown parsing failed or 400 Bad Request occurred, fallback to plain text
+                logger.warning(
+                    "Telegram error on chunk %d/%d (status %d): %s. Retrying in plain text...",
+                    i, len(chunks), res.status_code, res.text
+                )
+                clean_chunk = chunk.replace("*", "").replace("`", "").replace("_", "")
+                payload_plain = {
+                    "chat_id": self.chat_id,
+                    "text": clean_chunk,
+                }
+                res_plain = requests.post(url, json=payload_plain, timeout=12)
+                if res_plain.status_code == 200:
+                    logger.info("Telegram message chunk %d/%d delivered successfully as plain text.", i, len(chunks))
+                else:
+                    logger.error("Failed to send plain text chunk %d/%d (status %d): %s", i, len(chunks), res_plain.status_code, res_plain.text)
+                    all_success = False
+            except Exception as e:
+                logger.error("Network exception while sending Telegram chunk %d/%d: %s", i, len(chunks), e)
+                all_success = False
+
+        return all_success
 
     def build_core_report(self, core_picks: List[BetEvaluation]) -> str:
         """Formats institutional core bets."""
         if not core_picks:
-            return "🟢 *[CORE QUANT - ALTA CONVICCIÓN]*\n_Sin posiciones +EV que cumplan los filtros institucionales hoy._\n"
+            return "🟢 *CORE QUANT - ALTA CONVICCIÓN*\n_Sin posiciones +EV que cumplan los filtros institucionales hoy._\n"
 
         lines = [
-            "🟢 *[CORE QUANT - ALTA CONVICCIÓN]*",
+            "🟢 *CORE QUANT - ALTA CONVICCIÓN*",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ]
         total_stake_fraction = sum(p.recommended_stake_fraction for p in core_picks)
@@ -65,13 +140,13 @@ class TelegramNotifier:
         """Formats recreational Draftea parlay ticket."""
         if not parlay:
             return (
-                "🎰 *[ACTION PARLAY - DRAFTEA / FUN]*\n"
+                "🎰 *ACTION PARLAY - DRAFTEA / FUN*\n"
                 "_Sin combinada que satisfaga correlación positiva o cuota >= 8.0 hoy._\n"
             )
 
         current_spend = spent_this_week_mxn + parlay.stake_mxn
         lines = [
-            "🎰 *[ACTION PARLAY - DRAFTEA / FUN]*",
+            "🎰 *ACTION PARLAY - DRAFTEA / FUN*",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             f"🎟️ *Ticket ID:* `{parlay.ticket_id}`",
             f"🔥 *Cuota Total:* `{parlay.combined_odds:.2f}`",
@@ -105,7 +180,7 @@ class TelegramNotifier:
         """Assembles unified Telegram notification text."""
         banner = ""
         if is_preseason:
-            banner = "⚠️ [SANDBOX / CALIBRACIÓN PRETEMPORADA - ROTACIONES NO OFICIALES - NO APOSTAR] ⚠️\n\n"
+            banner = "⚠️ *SANDBOX / CALIBRACIÓN PRETEMPORADA - ROTACIONES NO OFICIALES - NO APOSTAR* ⚠️\n\n"
 
         header = (
             "🏀 *NBA QUANT TRADING ENGINE - REPORTE DIARIO*\n"
@@ -139,24 +214,7 @@ class TelegramNotifier:
             print(safe_text)
         print("=" * 60 + "\n")
 
-        if not self.bot_token or not self.chat_id:
-            logger.info("Telegram credentials not configured. Printed notification to console.")
-            return False
-
-        try:
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            payload = {
-                "chat_id": self.chat_id,
-                "text": message_text,
-                "parse_mode": "Markdown",
-            }
-            res = requests.post(url, json=payload, timeout=8)
-            res.raise_for_status()
-            logger.info("Telegram notification sent successfully.")
-            return True
-        except Exception as e:
-            logger.warning("Failed to send Telegram message: %s", e)
-            return False
+        return self._send_text(message_text)
 
     def send_settlement_report(
         self,
@@ -231,22 +289,4 @@ class TelegramNotifier:
         except Exception:
             print(clean_text.encode("ascii", errors="replace").decode("ascii"))
 
-        if not self.bot_token or not self.chat_id:
-            logger.info("Telegram credentials not configured. Settlement report printed to console.")
-            return False
-
-        try:
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            payload = {
-                "chat_id": self.chat_id,
-                "text": message_text,
-                "parse_mode": "Markdown",
-            }
-            res = requests.post(url, json=payload, timeout=8)
-            res.raise_for_status()
-            logger.info("Settlement report sent to Telegram successfully.")
-            return True
-        except Exception as e:
-            logger.warning("Failed to send settlement report to Telegram: %s", e)
-            return False
-
+        return self._send_text(message_text)
