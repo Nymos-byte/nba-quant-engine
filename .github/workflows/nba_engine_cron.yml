@@ -1,0 +1,109 @@
+name: NBA Quant Engine Scheduled Runner
+
+on:
+  # Ejecución automática por cron nativo de GitHub
+  schedule:
+    # 1. Generación de pronósticos: 17:00 UTC (11:00 AM CDMX)
+    - cron: '0 17 * * *'
+    # 2. Liquidación de apuestas: 07:00 UTC (01:00 AM CDMX)
+    - cron: '0 7 * * *'
+
+  # Ejecución manual desde la pestaña Actions de GitHub
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Tarea a ejecutar: pipeline (main.py), settle (settle_nba.py), o all'
+        required: true
+        default: 'pipeline'
+        type: choice
+        options:
+          - pipeline
+          - settle
+          - all
+      target_date:
+        description: 'Fecha objetivo (YYYY-MM-DD, opcional)'
+        required: false
+        default: ''
+
+  # Disparo externo vía Webhook / cron-job.org (repository_dispatch)
+  repository_dispatch:
+    types: [run-pipeline, run-settle, run-all]
+
+jobs:
+  run-quant-engine:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Permite guardar el historial de picks y liquidación en el repo
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar pruebas de sanidad
+        run: |
+          python -m pytest tests/ -v
+
+      # Determinación de tarea según cron o dispatch
+      - name: Ejecutar Pipeline Diario (main.py)
+        if: |
+          github.event.schedule == '0 17 * * *' ||
+          github.event.inputs.task == 'pipeline' ||
+          github.event.inputs.task == 'all' ||
+          github.event.action == 'run-pipeline' ||
+          github.event.action == 'run-all'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_REGION: ${{ secrets.ODDS_API_REGION || 'us' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BANKROLL_CORE: ${{ secrets.BANKROLL_CORE || '1000.0' }}
+          WEEKLY_FUN_BUDGET: ${{ secrets.WEEKLY_FUN_BUDGET || '150.0' }}
+        run: |
+          if [ -n "${{ github.event.inputs.target_date }}" ]; then
+            python main.py --date "${{ github.event.inputs.target_date }}"
+          else
+            python main.py
+          fi
+
+      - name: Ejecutar Liquidación Diaria (settle_nba.py)
+        if: |
+          github.event.schedule == '0 7 * * *' ||
+          github.event.inputs.task == 'settle' ||
+          github.event.inputs.task == 'all' ||
+          github.event.action == 'run-settle' ||
+          github.event.action == 'run-all'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "${{ github.event.inputs.target_date }}" ]; then
+            python settle_nba.py --date "${{ github.event.inputs.target_date }}"
+          else
+            python settle_nba.py
+          fi
+
+      - name: Guardar y sincronizar historial en GitHub
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/history/ data/cache/
+          if git diff --staged --quiet; then
+            echo "Sin cambios en el historial para registrar."
+          else
+            git commit -m "chore(history): automated update of daily picks and settlement [skip ci]"
+            git push origin main
+          fi

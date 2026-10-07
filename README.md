@@ -176,3 +176,45 @@ Cobertura de pruebas:
 - `tests/test_rating_engine.py`: Proyección de posesiones, ratings ofensivos/defensivos, HCA (2.8 pts), convergencia Monte Carlo.
 - `tests/test_benter_engine.py`: De-vigging de cuotas, ensamble Benter, cálculo de Edge, EV% y Quarter-Kelly.
 - `tests/test_parlays.py`: Construcción de combinadas correlacionadas, rango de cuotas (8.0 a 25.0), evaluación de líneas alternativas y detección de trampas.
+
+---
+
+## ☁️ Ejecución Online Automatizada (Cron Jobs en la Nube)
+
+Tienes dos métodos listos para ejecutar el motor online sin necesidad de tener tu computadora encendida:
+
+### Método 1: GitHub Actions (100% Nativo y Gratuito)
+El repositorio incluye el workflow [`.github/workflows/nba_engine_cron.yml`](file:///.github/workflows/nba_engine_cron.yml) que corre automáticamente en los servidores de GitHub:
+- **Pronósticos matutinos:** Corre todos los días a las **17:00 UTC** (11:00 AM CDMX).
+- **Liquidación nocturna:** Corre todos los días a las **07:00 UTC** (01:00 AM CDMX).
+- **Sincronización:** Guarda y comitea automáticamente los archivos de historial `picks_*.csv` al repositorio.
+
+**Cómo activarlo con tus APIs:**
+1. En GitHub, ve a tu repositorio ➔ **Settings** ➔ **Secrets and variables** ➔ **Actions**.
+2. Haz clic en **New repository secret** y añade:
+   - `ODDS_API_KEY`: Tu clave de The Odds API.
+   - `TELEGRAM_BOT_TOKEN`: El token de tu bot de Telegram.
+   - `TELEGRAM_CHAT_ID`: Tu ID de chat en Telegram.
+
+### Método 2: Disparo con cron-job.org
+Puedes usar [cron-job.org](https://cron-job.org) para disparar las tareas a la hora exacta que elijas:
+
+**Opción A: Disparo directo a GitHub Actions vía Webhook**
+Crea un trabajo en `cron-job.org` apuntando a la API de GitHub:
+- **URL:** `https://api.github.com/repos/Nymos-byte/nba-quant-engine/dispatches`
+- **Method:** `POST`
+- **Headers:**
+  - `Accept: application/vnd.github+json`
+  - `Authorization: Bearer <TU_GITHUB_PERSONAL_ACCESS_TOKEN>`
+- **Request Body (JSON):**
+  ```json
+  {"event_type": "run-pipeline"}
+  ```
+  (O `{"event_type": "run-settle"}` para liquidar).
+
+**Opción B: Servidor Webhook Ligero (`app.py`)**
+Si despliegas este repositorio en un hosting gratuito (Render, Railway, PythonAnywhere, etc.):
+- Ejecuta `python app.py` (expone puerto 8080).
+- Configura en `cron-job.org`:
+  - `GET https://tu-servicio.onrender.com/run-pipeline`
+  - `GET https://tu-servicio.onrender.com/settle`
