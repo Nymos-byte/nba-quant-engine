@@ -20,6 +20,7 @@ htmlcov/
 # Caché de datos locales dinámicos
 data/cache/*
 !data/cache/.gitkeep
+!data/cache/*2025_26.json
 
 # IDEs y editores
 .idea/

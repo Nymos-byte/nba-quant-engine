@@ -223,6 +223,7 @@ class TelegramNotifier:
         summary: dict,
         settled_rows: List[dict],
         historical_stats: Optional[dict] = None,
+        is_preseason: bool = False,
     ) -> bool:
         """Formats and transmits the daily settlement report via Telegram."""
         won = summary.get("won", 0)
@@ -235,7 +236,11 @@ class TelegramNotifier:
 
         pnl_symbol = "🟢 +" if total_pnl >= 0 else "🔴 "
 
-        lines = [
+        lines = []
+        if is_preseason:
+            lines.append("⚠️ *[CALIBRACIÓN PRETEMPORADA - RESULTADOS DE PRUEBA]* ⚠️\n")
+
+        lines.extend([
             "📊 *NBA QUANT ENGINE - LIQUIDACIÓN DE RESULTADOS*",
             f"📅 *Fecha:* `{target_date}`",
             "─────────────────────────────",
@@ -245,7 +250,7 @@ class TelegramNotifier:
             f"📈 *ROI del Día:* *{roi:+.2f}%*",
             "─────────────────────────────",
             "*Detalle de Posiciones:*",
-        ]
+        ])
 
         for row in settled_rows:
             res = row.get("result", "PENDING")
@@ -266,10 +271,11 @@ class TelegramNotifier:
             h_roi = historical_stats.get("roi_percent", 0.0)
             h_wr = (h_won / (h_won + h_lost) * 100.0) if (h_won + h_lost) > 0 else 0.0
             h_symbol = "🟢 +" if h_pnl >= 0 else "🔴 "
+            season_lbl = historical_stats.get("season_type", "Pretemporada" if is_preseason else "Temporada Regular")
 
             lines.extend([
                 "─────────────────────────────",
-                "🏦 *Métricas Históricas Acumuladas:*",
+                f"🏦 *Métricas Históricas ({season_lbl}):*",
                 f"• Récord Global: `{h_won}W - {h_lost}L - {h_push}P` ({h_wr:.1f}%)",
                 f"• PnL Acumulado: *{h_symbol}${abs(h_pnl):.2f}*",
                 f"• ROI Acumulado: *{h_roi:+.2f}%*",

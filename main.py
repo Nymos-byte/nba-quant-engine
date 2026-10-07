@@ -153,8 +153,9 @@ def persist_picks_to_csv(
         for r in rows:
             writer.writerow(r)
 
-    # Master production file (always updated for Paper Trading audit)
-    prod_master = output_dir / "todas_las_apuestas.csv"
+    # Master file (strictly separated to prevent preseason data contamination)
+    master_name = "preseason_apuestas.csv" if is_preseason else "todas_las_apuestas.csv"
+    prod_master = output_dir / master_name
     file_exists = prod_master.exists()
     with open(prod_master, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -162,7 +163,7 @@ def persist_picks_to_csv(
             writer.writeheader()
         for r in rows:
             writer.writerow(r)
-    logger.info("Updated master production record: %s", prod_master.name)
+    logger.info("Updated master record (%s): %s", "PRESEASON" if is_preseason else "REGULAR SEASON", prod_master.name)
 
     logger.info("Persisted %d approved picks to %s", len(rows), out_file.name)
     return out_file

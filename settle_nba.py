@@ -43,36 +43,38 @@ class SettlementEngine:
     def is_already_settled(self, date_str: str) -> bool:
         return self.get_sentinel_path(date_str).exists()
 
-    def compute_historical_stats(self) -> Dict[str, Any]:
-        """Calculates cumulative performance metrics across all historical CSVs."""
+    def compute_historical_stats(self, is_preseason: bool = False) -> Dict[str, Any]:
+        """Calculates cumulative performance metrics from the designated master CSV."""
+        master_name = "preseason_apuestas.csv" if is_preseason else "todas_las_apuestas.csv"
+        master_file = self.history_dir / master_name
+
         total_won = 0
         total_lost = 0
         total_push = 0
         total_pnl = 0.0
         total_staked = 0.0
 
-        for csv_file in sorted(self.history_dir.glob("picks_*.csv")):
+        if master_file.exists():
             try:
-                df = pd.read_csv(csv_file)
-                if df.empty or "result" not in df.columns:
-                    continue
-                for _, row in df.iterrows():
-                    res = str(row.get("result", "")).upper()
-                    pnl_val = float(row.get("pnl", 0.0))
-                    stake_val = float(row.get("stake_amount", 0.0))
-                    if res == "WON":
-                        total_won += 1
-                        total_pnl += pnl_val
-                        total_staked += stake_val
-                    elif res == "LOST":
-                        total_lost += 1
-                        total_pnl += pnl_val
-                        total_staked += stake_val
-                    elif res == "PUSH":
-                        total_push += 1
-                        total_staked += stake_val
+                df = pd.read_csv(master_file)
+                if not df.empty and "result" in df.columns:
+                    for _, row in df.iterrows():
+                        res = str(row.get("result", "")).upper()
+                        pnl_val = float(row.get("pnl", 0.0))
+                        stake_val = float(row.get("stake_amount", 0.0))
+                        if res == "WON":
+                            total_won += 1
+                            total_pnl += pnl_val
+                            total_staked += stake_val
+                        elif res == "LOST":
+                            total_lost += 1
+                            total_pnl += pnl_val
+                            total_staked += stake_val
+                        elif res == "PUSH":
+                            total_push += 1
+                            total_staked += stake_val
             except Exception as e:
-                logger.debug("Error computing historical stats from %s: %s", csv_file.name, e)
+                logger.debug("Error computing historical stats from %s: %s", master_file.name, e)
 
         roi = (total_pnl / total_staked * 100.0) if total_staked > 0 else 0.0
         return {
@@ -82,6 +84,7 @@ class SettlementEngine:
             "total_pnl": round(total_pnl, 2),
             "total_staked": round(total_staked, 2),
             "roi_percent": round(roi, 2),
+            "season_type": "Pretemporada" if is_preseason else "Temporada Regular",
         }
 
     def fetch_box_scores(self, date_str: str) -> Dict[str, Dict[str, Any]]:
@@ -369,17 +372,23 @@ class SettlementEngine:
         pd.DataFrame(settled_rows).to_csv(picks_file, index=False)
         logger.info("Updated historical CSV: %s", picks_file.name)
 
-        # Sync master historical record
-        master_file = config.HISTORY_DIR / "todas_las_apuestas.csv"
+        # Sync master historical record (preseason separated from regular season)
+        target_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+        is_preseason = target_dt < config.REGULAR_SEASON_START_DATE
+        master_name = "preseason_apuestas.csv" if is_preseason else "todas_las_apuestas.csv"
+        master_file = config.HISTORY_DIR / master_name
+
         if master_file.exists():
             try:
                 mdf = pd.read_csv(master_file)
                 mdf = mdf[mdf["date"] != date_str]
                 updated_mdf = pd.concat([mdf, pd.DataFrame(settled_rows)], ignore_index=True)
                 updated_mdf.to_csv(master_file, index=False)
-                logger.info("Synchronized master record: %s", master_file.name)
+                logger.info("Synchronized master record (%s): %s", "PRESEASON" if is_preseason else "REGULAR SEASON", master_file.name)
             except Exception as e:
                 logger.debug("Failed updating master record %s: %s", master_file.name, e)
+        else:
+            pd.DataFrame(settled_rows).to_csv(master_file, index=False)
 
         # If no bets finished yet, postpone settlement
         if won_count + lost_count + push_count == 0:
@@ -410,8 +419,8 @@ class SettlementEngine:
             "roi_percent": round(roi, 2),
         }
 
-        # Compute historical stats across all previous records
-        historical_stats = self.compute_historical_stats()
+        # Compute historical stats across master records
+        historical_stats = self.compute_historical_stats(is_preseason=is_preseason)
 
         # Send Telegram Settlement Report
         notifier = TelegramNotifier()
@@ -420,6 +429,7 @@ class SettlementEngine:
             summary=summary,
             settled_rows=settled_rows,
             historical_stats=historical_stats,
+            is_preseason=is_preseason,
         )
 
         return summary
