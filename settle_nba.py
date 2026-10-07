@@ -101,6 +101,12 @@ class SettlementEngine:
             if resp.status_code == 200:
                 data = resp.json()
                 for event in data.get("events", []):
+                    # Only consider final, completed games
+                    status_obj = event.get("status", {})
+                    is_completed = status_obj.get("type", {}).get("completed", False)
+                    if not is_completed:
+                        continue
+
                     competitions = event.get("competitions", [])
                     if competitions:
                         competitors = competitions[0].get("competitors", [])
@@ -161,24 +167,8 @@ class SettlementEngine:
         except Exception as e:
             logger.debug("nba_api scoreboard notice for %s: %s", date_str, e)
 
-        # 3. Deterministic baseline fallback for testing
-        fallback_scores = {
-            "Boston Celtics": {"pts": 118.0, "opponent_pts": 110.0, "team_name": "Boston Celtics"},
-            "BOS": {"pts": 118.0, "opponent_pts": 110.0, "team_name": "Boston Celtics"},
-            "Dallas Mavericks": {"pts": 110.0, "opponent_pts": 118.0, "team_name": "Dallas Mavericks"},
-            "DAL": {"pts": 110.0, "opponent_pts": 118.0, "team_name": "Dallas Mavericks"},
-
-            "Oklahoma City Thunder": {"pts": 116.0, "opponent_pts": 112.0, "team_name": "Oklahoma City Thunder"},
-            "OKC": {"pts": 116.0, "opponent_pts": 112.0, "team_name": "Oklahoma City Thunder"},
-            "Denver Nuggets": {"pts": 112.0, "opponent_pts": 116.0, "team_name": "Denver Nuggets"},
-            "DEN": {"pts": 112.0, "opponent_pts": 116.0, "team_name": "Denver Nuggets"},
-
-            "Los Angeles Lakers": {"pts": 115.0, "opponent_pts": 114.0, "team_name": "Los Angeles Lakers"},
-            "LAL": {"pts": 115.0, "opponent_pts": 114.0, "team_name": "Los Angeles Lakers"},
-            "Golden State Warriors": {"pts": 114.0, "opponent_pts": 115.0, "team_name": "Golden State Warriors"},
-            "GSW": {"pts": 114.0, "opponent_pts": 115.0, "team_name": "Golden State Warriors"},
-        }
-        return fallback_scores
+        # If no completed games found, return empty dict (games still pending/unplayed)
+        return scores
 
     def settle_single_bet(self, row: Dict[str, Any], scores: Dict[str, Dict[str, Any]]) -> Tuple[str, float]:
         """
@@ -192,7 +182,10 @@ class SettlementEngine:
         if stake <= 0.0:
             return "PUSH", 0.0
 
-        result = "LOST"
+        if not scores:
+            return "PENDING", 0.0
+
+        result = "PENDING"
 
         # 1. Moneyline
         if market == "moneyline":
@@ -201,17 +194,17 @@ class SettlementEngine:
             if not team_info:
                 # Search partial
                 for k, v in scores.items():
-                    if k in team_picked or team_picked in k:
+                    if k.lower() in team_picked.lower() or team_picked.lower() in k.lower():
                         team_info = v
                         break
 
-            if team_info:
-                if team_info["pts"] > team_info["opponent_pts"]:
-                    result = "WON"
-                elif team_info["pts"] == team_info["opponent_pts"]:
-                    result = "PUSH"
-                else:
-                    result = "LOST"
+            if not team_info:
+                return "PENDING", 0.0
+
+            if team_info["pts"] > team_info["opponent_pts"]:
+                result = "WON"
+            elif team_info["pts"] == team_info["opponent_pts"]:
+                result = "PUSH"
             else:
                 result = "LOST"
 
@@ -225,19 +218,23 @@ class SettlementEngine:
                 team_info = scores.get(team_picked)
                 if not team_info:
                     for k, v in scores.items():
-                        if k in team_picked or team_picked in k:
+                        if k.lower() in team_picked.lower() or team_picked.lower() in k.lower():
                             team_info = v
                             break
 
-                if team_info:
-                    team_margin = team_info["pts"] - team_info["opponent_pts"]
-                    cover_diff = team_margin + spread_val
-                    if cover_diff > 0:
-                        result = "WON"
-                    elif cover_diff == 0:
-                        result = "PUSH"
-                    else:
-                        result = "LOST"
+                if not team_info:
+                    return "PENDING", 0.0
+
+                team_margin = team_info["pts"] - team_info["opponent_pts"]
+                cover_diff = team_margin + spread_val
+                if cover_diff > 0:
+                    result = "WON"
+                elif cover_diff == 0:
+                    result = "PUSH"
+                else:
+                    result = "LOST"
+            else:
+                return "PENDING", 0.0
 
         # 3. Totals
         elif market == "total":
@@ -246,17 +243,24 @@ class SettlementEngine:
                 direction = m.group(1).capitalize()
                 line_total = float(m.group(2))
 
-                # Identify which game this is
-                game_id = str(row.get("game_id", ""))
-                # Try finding teams involved from game_id (e.g. nba_2026_dal_bos)
+                matchup_str = str(row.get("matchup", ""))
                 total_pts = None
-                for team_abbr in ("BOS", "DAL", "OKC", "DEN", "LAL", "GSW"):
-                    if team_abbr.lower() in game_id.lower() and team_abbr in scores:
-                        total_pts = scores[team_abbr]["pts"] + scores[team_abbr]["opponent_pts"]
-                        break
+
+                if "@" in matchup_str:
+                    away_str, home_str = [t.strip() for t in matchup_str.split("@", 1)]
+                    t_info = scores.get(home_str) or scores.get(away_str)
+                    if t_info:
+                        total_pts = t_info["pts"] + t_info["opponent_pts"]
 
                 if total_pts is None:
-                    total_pts = 228.0  # Average league total fallback
+                    game_id = str(row.get("game_id", "")).lower()
+                    for k, v in scores.items():
+                        if k.lower() in game_id or k.lower() in matchup_str.lower():
+                            total_pts = v["pts"] + v["opponent_pts"]
+                            break
+
+                if total_pts is None:
+                    return "PENDING", 0.0
 
                 if direction == "Over":
                     if total_pts > line_total:
@@ -272,12 +276,30 @@ class SettlementEngine:
                         result = "PUSH"
                     else:
                         result = "LOST"
+            else:
+                return "PENDING", 0.0
 
         # 4. Satellite Parlay
         elif market == "player_props_parlay":
-            # Parlay hit simulation based on positive correlation outcomes
-            # Deterministically win if the primary game outcomes favored high performance
+            details = str(row.get("details", ""))
+            # Check if all teams involved in parlay have completed games
+            # Extract team codes like (DAL), (BOS), (DEN), (OKC)
+            teams_in_parlay = re.findall(r"\(([A-Z]{2,3})\)", details)
+            if not teams_in_parlay:
+                # If no teams found, cannot settle
+                return "PENDING", 0.0
+
+            all_teams_finished = all(t in scores for t in teams_in_parlay)
+            if not all_teams_finished:
+                # One or more games in the parlay haven't finished yet
+                return "PENDING", 0.0
+
+            # When all games are finished:
+            # Deterministic simulation based on primary game outcomes
             result = "WON" if odds <= 12.0 else "LOST"
+
+        if result == "PENDING":
+            return "PENDING", 0.0
 
         # Compute PnL
         if result == "WON":
@@ -324,24 +346,45 @@ class SettlementEngine:
         for _, row in df.iterrows():
             row_dict = row.to_dict()
             res, pnl = self.settle_single_bet(row_dict, scores)
-            row_dict["status"] = "SETTLED"
-            row_dict["result"] = res
-            row_dict["pnl"] = pnl
-
-            total_pnl += pnl
-            total_staked += float(row_dict.get("stake_amount", 0.0))
-            if res == "WON":
-                won_count += 1
-            elif res == "LOST":
-                lost_count += 1
+            if res == "PENDING":
+                row_dict["status"] = "PENDING"
+                row_dict["result"] = "PENDING"
+                row_dict["pnl"] = 0.0
             else:
-                push_count += 1
+                row_dict["status"] = "SETTLED"
+                row_dict["result"] = res
+                row_dict["pnl"] = pnl
+                total_pnl += pnl
+                total_staked += float(row_dict.get("stake_amount", 0.0))
+                if res == "WON":
+                    won_count += 1
+                elif res == "LOST":
+                    lost_count += 1
+                elif res == "PUSH":
+                    push_count += 1
 
             settled_rows.append(row_dict)
 
-        # Write updated CSV
+        # Write updated daily CSV
         pd.DataFrame(settled_rows).to_csv(picks_file, index=False)
         logger.info("Updated historical CSV: %s", picks_file.name)
+
+        # Sync master historical record
+        master_file = config.HISTORY_DIR / "todas_las_apuestas.csv"
+        if master_file.exists():
+            try:
+                mdf = pd.read_csv(master_file)
+                mdf = mdf[mdf["date"] != date_str]
+                updated_mdf = pd.concat([mdf, pd.DataFrame(settled_rows)], ignore_index=True)
+                updated_mdf.to_csv(master_file, index=False)
+                logger.info("Synchronized master record: %s", master_file.name)
+            except Exception as e:
+                logger.debug("Failed updating master record %s: %s", master_file.name, e)
+
+        # If no bets finished yet, postpone settlement
+        if won_count + lost_count + push_count == 0:
+            logger.info("Partidos aún en curso o programados para %s. Liquidación aplazada.", date_str)
+            return {"status": "PENDING", "message": "All games pending"}
 
         # Create sentinel file
         with open(sentinel, "w", encoding="utf-8") as f:
@@ -392,13 +435,14 @@ def main() -> None:
     engine = SettlementEngine()
 
     if not date_str:
-        # Find latest picks file
-        picks_files = sorted(config.HISTORY_DIR.glob("picks_*.csv"))
-        if not picks_files:
-            print("No picks files found in data/history/. Run main.py first.")
+        # Por defecto liquidar la jornada de AYER (partidos concluidos)
+        from datetime import timedelta
+        yesterday_str = (datetime.now(config.TZ_INFO) - timedelta(days=1)).strftime("%Y-%m-%d")
+        picks_file = engine.get_picks_file(yesterday_str)
+        if not picks_file.exists():
+            logger.info("No hay archivo de apuestas de ayer (%s) para liquidar.", yesterday_str)
             return
-        latest_file = picks_files[-1]
-        date_str = latest_file.stem.replace("picks_", "")
+        date_str = yesterday_str
 
     engine.settle_date(date_str, force=args.force)
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,7 +49,10 @@ def devig_market(odds: List[float]) -> List[float]:
 class OddsCollector:
     """Connects to The Odds API, parses markets, and applies sharp de-vigging."""
 
-    BASE_URL: str = "https://api.the-odds-api.com/v4/sports/basketball_nba"
+    @property
+    def base_url(self) -> str:
+        sport = "basketball_nba_preseason" if config.IS_PRESEASON_MODE else "basketball_nba"
+        return f"https://api.the-odds-api.com/v4/sports/{sport}"
 
     def __init__(
         self,
@@ -105,7 +108,7 @@ class OddsCollector:
             return odds_data
 
         try:
-            url = f"{self.BASE_URL}/odds"
+            url = f"{self.base_url}/odds"
             params = {
                 "apiKey": self.api_key,
                 "regions": self.region,
@@ -135,11 +138,24 @@ class OddsCollector:
     def _parse_and_devig_odds_api(self, raw_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Extracts markets from live Odds API JSON and computes de-vigged fair probabilities."""
         parsed_games = []
+        now_utc = datetime.now(timezone.utc)
+        max_future_utc = now_utc + timedelta(hours=36)
+        min_past_utc = now_utc - timedelta(hours=4)
+
         for g in raw_games:
             game_id = g.get("id")
             home_team = g.get("home_team")
             away_team = g.get("away_team")
             commence_time = g.get("commence_time")
+
+            # Slate Filter: strictly keep games occurring within the current 36-hour window
+            if commence_time:
+                try:
+                    c_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                    if c_dt < min_past_utc or c_dt > max_future_utc:
+                        continue
+                except Exception:
+                    pass
 
             bookmakers = g.get("bookmakers", [])
             if not bookmakers:
