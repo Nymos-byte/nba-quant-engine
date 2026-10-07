@@ -142,25 +142,31 @@ class NBADataCollector:
 
     def get_team_stats(
         self,
-        season: str = config.NBA_SEASON_CURRENT,
+        season: str = config.BASELINE_SEASON,
         force_refresh: bool = False,
     ) -> pd.DataFrame:
         """
         Retrieves Team Pace, ORtg, DRtg and baseline league stats.
+        Forces regular season baseline (preseason data prohibited for ratings).
         Columns guaranteed:
         ['team_id', 'team_name', 'team_abbreviation', 'pace', 'ortg', 'drtg', 'pts', 'gp']
         """
-        cache_key = f"team_stats_{season.replace('-', '_')}"
+        target_season = config.BASELINE_SEASON  # Enforce historical baseline
+        cache_key = f"team_stats_{target_season.replace('-', '_')}"
         if not force_refresh:
             cached = self._read_cache(cache_key)
             if cached:
                 return pd.DataFrame(cached)
 
-        logger.info("Fetching Team Stats from stats.nba.com for season %s...", season)
+        logger.info(
+            "Fetching Team Stats from stats.nba.com for baseline season %s (SeasonType='Regular Season')...",
+            target_season,
+        )
         try:
             res = self._retry_api_call(
                 leaguedashteamstats.LeagueDashTeamStats,
-                season=season,
+                season=target_season,
+                season_type_all_star="Regular Season",
                 per_mode_detailed="PerGame",
                 measure_type_detailed_defense="Advanced",
             )
@@ -192,26 +198,32 @@ class NBADataCollector:
 
     def get_player_stats(
         self,
-        season: str = config.NBA_SEASON_CURRENT,
+        season: str = config.BASELINE_SEASON,
         force_refresh: bool = False,
     ) -> pd.DataFrame:
         """
         Retrieves Player stats: minutes, usage, points, rebounds, assists, 3-pointers.
+        Forces regular season baseline (preseason stats prohibited).
         Columns guaranteed:
         ['player_id', 'player_name', 'team_id', 'team_abbreviation', 'min', 'usg_pct', 'pts', 'reb', 'ast', 'fg3m']
         """
-        cache_key = f"player_stats_{season.replace('-', '_')}"
+        target_season = config.BASELINE_SEASON
+        cache_key = f"player_stats_{target_season.replace('-', '_')}"
         if not force_refresh:
             cached = self._read_cache(cache_key)
             if cached:
                 return pd.DataFrame(cached)
 
-        logger.info("Fetching Player Stats from stats.nba.com for season %s...", season)
+        logger.info(
+            "Fetching Player Stats from stats.nba.com for baseline season %s (SeasonType='Regular Season')...",
+            target_season,
+        )
         try:
             # Usage and advanced stats
             res_adv = self._retry_api_call(
                 leaguedashplayerstats.LeagueDashPlayerStats,
-                season=season,
+                season=target_season,
+                season_type_all_star="Regular Season",
                 per_mode_detailed="PerGame",
                 measure_type_detailed_defense="Advanced",
             )
@@ -220,7 +232,8 @@ class NBADataCollector:
             # Traditional stats for points, rebounds, assists, triples
             res_trad = self._retry_api_call(
                 leaguedashplayerstats.LeagueDashPlayerStats,
-                season=season,
+                season=target_season,
+                season_type_all_star="Regular Season",
                 per_mode_detailed="PerGame",
                 measure_type_detailed_defense="Base",
             )

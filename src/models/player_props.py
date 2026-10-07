@@ -102,3 +102,40 @@ class PlayerPropsModel:
     def calculate_under_prob(self, dist: PropDistribution, line: float) -> float:
         """Calculates P(stat < line)."""
         return float(1.0 - self.calculate_over_prob(dist, line))
+
+    def find_alt_floor_line(
+        self,
+        dist: PropDistribution,
+        min_prob: float = 0.75,
+    ) -> tuple[float, float, float]:
+        """
+        Calculates the alternative floor line for Draftea so that
+        P(stat >= floor_line) >= min_prob (75% or higher).
+
+        Returns:
+            (floor_line, exact_prob, alt_multiplier)
+        """
+        if dist.distribution_type == "normal":
+            # Normal distribution quantile: P(X >= L) >= min_prob
+            z = stats.norm.ppf(1.0 - min_prob)
+            raw_line = dist.adjusted_mean + (dist.std_dev * z)
+            # Step down to standard half-point line (e.g. 24.5, 27.5)
+            floor_line = max(0.5, float(np.floor(raw_line * 2.0) / 2.0))
+            exact_prob = self.calculate_over_prob(dist, floor_line)
+        else:
+            # Discrete Poisson: find highest threshold where P(X > k) >= min_prob
+            floor_line = 0.5
+            exact_prob = self.calculate_over_prob(dist, 0.5)
+            for test_val in np.arange(1.5, max(2.5, dist.adjusted_mean * 1.5), 1.0):
+                p = self.calculate_over_prob(dist, test_val)
+                if p >= min_prob:
+                    floor_line = float(test_val)
+                    exact_prob = p
+                else:
+                    break
+
+        # Calculate Draftea-style parlay multiplier
+        # For ~75-82% probability legs, multiplier is typically 1.70 to 2.15
+        alt_multiplier = round(max(1.70, min(2.15, (1.0 / exact_prob) * 1.35)), 2)
+        return float(floor_line), float(exact_prob), float(alt_multiplier)
+

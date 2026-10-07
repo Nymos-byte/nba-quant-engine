@@ -100,24 +100,30 @@ class TelegramNotifier:
         core_picks: List[BetEvaluation],
         parlay: Optional[ParlayTicket],
         spent_this_week_mxn: float = 0.0,
+        is_preseason: bool = config.IS_PRESEASON_MODE,
     ) -> str:
         """Assembles unified Telegram notification text."""
+        banner = ""
+        if is_preseason:
+            banner = "⚠️ [SANDBOX / CALIBRACIÓN PRETEMPORADA - ROTACIONES NO OFICIALES - NO APOSTAR] ⚠️\n\n"
+
         header = (
             "🏀 *NBA QUANT TRADING ENGINE - REPORTE DIARIO*\n"
             "Arquitectura Core & Satellite (Benter + Kelly + Draftea)\n\n"
         )
         core_sec = self.build_core_report(core_picks)
         sat_sec = self.build_satellite_report(parlay, spent_this_week_mxn)
-        return header + core_sec + "\n" + sat_sec
+        return banner + header + core_sec + "\n" + sat_sec
 
     def send_notification(
         self,
         core_picks: List[BetEvaluation],
         parlay: Optional[ParlayTicket],
         spent_this_week_mxn: float = 0.0,
+        is_preseason: bool = config.IS_PRESEASON_MODE,
     ) -> bool:
         """Sends message via Telegram if tokens configured, otherwise outputs to console."""
-        message_text = self.generate_full_report(core_picks, parlay, spent_this_week_mxn)
+        message_text = self.generate_full_report(core_picks, parlay, spent_this_week_mxn, is_preseason=is_preseason)
 
         # Always print to console safely
         print("\n" + "=" * 60)

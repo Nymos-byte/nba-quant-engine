@@ -52,11 +52,13 @@ class ParlayBuilder:
         max_odds: float = config.TARGET_PARLAY_MAX_ODDS,
         fixed_stake_mxn: float = config.PARLAY_FIXED_STAKE,
         weekly_budget_mxn: float = config.WEEKLY_FUN_BUDGET,
+        min_leg_prob: float = config.PARLAY_MIN_LEG_PROB,
     ) -> None:
         self.min_odds = min_odds
         self.max_odds = max_odds
         self.fixed_stake_mxn = fixed_stake_mxn
         self.weekly_budget_mxn = weekly_budget_mxn
+        self.min_leg_prob = min_leg_prob
 
     def calculate_combined_odds(self, legs: List[ParlayLeg]) -> float:
         """Multiplies decimal odds of independent/correlated legs."""
@@ -116,12 +118,18 @@ class ParlayBuilder:
             )
             return []
 
+        # Filter strictly: only legs with individual projected probability >= min_leg_prob (75%)
+        eligible_legs = [l for l in candidate_legs if l.prob >= self.min_leg_prob]
+        if len(eligible_legs) < 3:
+            logger.info("Not enough candidate legs with P >= %.2f to form a parlay (%d available).", self.min_leg_prob, len(eligible_legs))
+            return []
+
         valid_tickets: List[ParlayTicket] = []
         ticket_counter = 1
 
         # Search combinations of 3 and 4 legs
         for leg_count in (3, 4):
-            for combo in itertools.combinations(candidate_legs, leg_count):
+            for combo in itertools.combinations(eligible_legs, leg_count):
                 legs = list(combo)
 
                 # Ensure player deduplication: at most 1 prop per player

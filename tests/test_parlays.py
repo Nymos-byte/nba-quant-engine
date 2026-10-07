@@ -71,15 +71,16 @@ def test_line_evaluator_positive_value():
 
 
 def test_parlay_builder_odds_boundaries():
-    """Verify generated parlays fall strictly within [8.0, 25.0] combined odds."""
-    builder = ParlayBuilder(min_odds=8.0, max_odds=25.0, fixed_stake_mxn=20.0)
+    """Verify generated parlays fall strictly within [8.0, 25.0] combined odds and require P >= 0.75."""
+    builder = ParlayBuilder(min_odds=8.0, max_odds=25.0, fixed_stake_mxn=20.0, min_leg_prob=0.75)
 
+    # Candidate legs with floor probability >= 75%
     candidate_legs = [
-        ParlayLeg("Luka Doncic", "DAL", "BOS", "ast", 8.5, "Over", 1.85, 0.58, "STACK_PASS_SCORER"),
-        ParlayLeg("Kyrie Irving", "DAL", "BOS", "pts", 24.5, "Over", 1.88, 0.56, "STACK_PASS_SCORER"),
-        ParlayLeg("Jayson Tatum", "BOS", "DAL", "pts", 26.5, "Over", 1.85, 0.55, "PACE_BOOST"),
-        ParlayLeg("Nikola Jokic", "DEN", "OKC", "ast", 9.5, "Over", 1.80, 0.60, "PACE_BOOST"),
-        ParlayLeg("Shai Gilgeous-Alexander", "OKC", "DEN", "pts", 30.5, "Over", 1.85, 0.55, "PACE_BOOST"),
+        ParlayLeg("Luka Doncic", "DAL", "BOS", "pts", 24.5, "Over", 1.85, 0.78, "STACK_PASS_SCORER"),
+        ParlayLeg("Kyrie Irving", "DAL", "BOS", "ast", 3.5, "Over", 1.88, 0.76, "STACK_PASS_SCORER"),
+        ParlayLeg("Jayson Tatum", "BOS", "DAL", "pts", 20.5, "Over", 1.85, 0.75, "PACE_BOOST"),
+        ParlayLeg("Nikola Jokic", "DEN", "OKC", "ast", 7.5, "Over", 1.80, 0.82, "PACE_BOOST"),
+        ParlayLeg("Jamal Murray", "DEN", "OKC", "pts", 16.5, "Over", 1.88, 0.77, "STACK_PASS_SCORER"),
     ]
 
     tickets = builder.build_correlated_parlays(candidate_legs, spent_this_week_mxn=0.0)
@@ -90,16 +91,50 @@ def test_parlay_builder_odds_boundaries():
         assert 3 <= len(t.legs) <= 4
         assert t.stake_mxn == 20.0
         assert t.is_valid is True
+        for leg in t.legs:
+            assert leg.prob >= 0.75
+
+
+def test_parlay_builder_rejects_sub_75_probability_legs():
+    """Verify ParlayBuilder strictly excludes legs where P < 0.75."""
+    builder = ParlayBuilder(min_leg_prob=0.75)
+
+    low_prob_legs = [
+        ParlayLeg("Luka Doncic", "DAL", "BOS", "pts", 35.5, "Over", 2.20, 0.40, "STACK_PASS_SCORER"),
+        ParlayLeg("Kyrie Irving", "DAL", "BOS", "pts", 26.5, "Over", 1.90, 0.52, "STACK_PASS_SCORER"),
+        ParlayLeg("Jayson Tatum", "BOS", "DAL", "pts", 28.5, "Over", 1.85, 0.55, "PACE_BOOST"),
+    ]
+
+    tickets = builder.build_correlated_parlays(low_prob_legs)
+    assert len(tickets) == 0
+
+
+def test_find_alt_floor_line_meets_75_percent_threshold():
+    """Verify find_alt_floor_line returns an alternative line with P >= 75%."""
+    props_model = PlayerPropsModel()
+    dist = props_model.fit_distribution(
+        player_name="Luka Doncic",
+        team_abbreviation="DAL",
+        category="pts",
+        baseline_stat=32.4,
+        team_pace=100.0,
+        expected_game_pace=100.0,
+    )
+
+    floor_line, exact_prob, multiplier = props_model.find_alt_floor_line(dist, min_prob=0.75)
+    assert exact_prob >= 0.75
+    assert floor_line < dist.baseline_stat
+    assert multiplier >= 1.70
 
 
 def test_parlay_builder_correlation_preference():
     """Verify game script stacking (passer AST + teammate PTS) boosts correlation score."""
-    builder = ParlayBuilder()
+    builder = ParlayBuilder(min_leg_prob=0.75)
 
     correlated_legs = [
-        ParlayLeg("Luka Doncic", "DAL", "BOS", "ast", 8.5, "Over", 1.85, 0.58, "STACK_PASS_SCORER"),
-        ParlayLeg("Kyrie Irving", "DAL", "BOS", "pts", 24.5, "Over", 1.88, 0.56, "STACK_PASS_SCORER"),
-        ParlayLeg("Jayson Tatum", "BOS", "DAL", "pts", 26.5, "Over", 1.85, 0.55, "PACE_BOOST"),
+        ParlayLeg("Luka Doncic", "DAL", "BOS", "pts", 24.5, "Over", 1.85, 0.78, "STACK_PASS_SCORER"),
+        ParlayLeg("Kyrie Irving", "DAL", "BOS", "ast", 3.5, "Over", 1.88, 0.76, "STACK_PASS_SCORER"),
+        ParlayLeg("Jayson Tatum", "BOS", "DAL", "pts", 20.5, "Over", 1.85, 0.75, "PACE_BOOST"),
     ]
 
     score, rationale = builder.assess_correlation_score(correlated_legs)

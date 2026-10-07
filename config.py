@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import date
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -26,6 +27,15 @@ load_dotenv(BASE_DIR / ".env")
 # Official Timezone
 TIMEZONE: str = "America/Mexico_City"
 TZ_INFO: ZoneInfo = ZoneInfo(TIMEZONE)
+
+# ==========================================
+# CONTROL DE TEMPORADA Y PRETEMPORADA
+# ==========================================
+REGULAR_SEASON_START_DATE: date = date(2026, 10, 20)
+IS_PRESEASON_MODE: bool = date.today() < REGULAR_SEASON_START_DATE
+
+# Temporada base para extracción histórica obligatoria
+BASELINE_SEASON: str = "2025-26"
 
 # ==========================================
 # CORE QUANTITATIVE PARAMETERS (INSTITUTIONAL)
@@ -54,6 +64,7 @@ TARGET_PARLAY_MIN_ODDS: float = 8.0  # Decimal odds (+700)
 TARGET_PARLAY_MAX_ODDS: float = 25.0  # Decimal odds (+2400)
 MIN_PARLAY_LEGS: int = 3
 MAX_PARLAY_LEGS: int = 4
+PARLAY_MIN_LEG_PROB: float = 0.75  # 75% o superior para líneas alternativas de piso
 
 # ==========================================
 # API & NOTIFICATION SETTINGS
@@ -65,7 +76,7 @@ TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # Cache Settings
 CACHE_TTL_HOURS: int = int(os.getenv("CACHE_TTL_HOURS", "12"))
-NBA_SEASON_CURRENT: str = os.getenv("NBA_SEASON_CURRENT", "2025-26")
+NBA_SEASON_CURRENT: str = BASELINE_SEASON
 
 
 @dataclass(frozen=True)

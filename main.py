@@ -62,13 +62,23 @@ def persist_picks_to_csv(
     core_picks: List[BetEvaluation],
     parlay: Optional[ParlayTicket],
     date_str: str,
+    is_preseason: bool = config.IS_PRESEASON_MODE,
     output_dir: Path = config.HISTORY_DIR,
-) -> Path:
+) -> Optional[Path]:
     """
-    Saves daily approved trades to data/history/picks_YYYY-MM-DD.csv.
+    Saves daily approved trades.
+    If is_preseason is True: operates in SANDBOX mode and does NOT write to
+    production 'todas_las_apuestas.csv'.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_file = output_dir / f"picks_{date_str}.csv"
+    if is_preseason:
+        logger.warning(
+            "⚠️ [SANDBOX PRETEMPORADA]: Guardado en producción omitido ('todas_las_apuestas.csv'). Registrando en sandbox_picks_%s.csv",
+            date_str,
+        )
+        out_file = output_dir / f"sandbox_picks_{date_str}.csv"
+    else:
+        out_file = output_dir / f"picks_{date_str}.csv"
 
     fieldnames = [
         "date",
@@ -145,6 +155,18 @@ def persist_picks_to_csv(
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+
+    # Master production file (only updated when not in preseason mode)
+    if not is_preseason:
+        prod_master = output_dir / "todas_las_apuestas.csv"
+        file_exists = prod_master.exists()
+        with open(prod_master, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            for r in rows:
+                writer.writerow(r)
+        logger.info("Updated master production record: %s", prod_master.name)
 
     logger.info("Persisted %d approved picks to %s", len(rows), out_file.name)
     return out_file
@@ -275,7 +297,8 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
             )
             candidate_bets.append(eval_under)
 
-        # 4. Extract Candidate Player Props for Parlays
+    # 4. Extract Candidate Player Props for Parlays (Líneas de Piso Alternativas Draftea)
+        # PROHIBIDO usar las selecciones directas del Core en los parlays.
         home_abbr = home_stats.get("team_abbreviation")
         away_abbr = away_stats.get("team_abbreviation")
         team_abbrs = [home_abbr, away_abbr]
@@ -287,7 +310,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
             opp_abbr = away_abbr if is_home else home_abbr
             tm_stats = home_stats if is_home else away_stats
 
-            # Points prop
+            # Points: Línea de Piso Alternativa Draftea (P >= 75%)
             if pl["pts"] >= 15.0:
                 dist_pts = props_model.fit_distribution(
                     player_name=pl["player_name"],
@@ -297,25 +320,26 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
                     team_pace=tm_stats.get("pace", 100.0),
                     expected_game_pace=sim_res.expected_pace,
                 )
-                line_pts = round(pl["pts"] - 1.0, 1)
-                prob_pts = props_model.calculate_over_prob(dist_pts, line_pts)
-                if prob_pts > 0.52:
+                floor_pts, prob_pts, mult_pts = props_model.find_alt_floor_line(
+                    dist_pts, min_prob=config.PARLAY_MIN_LEG_PROB
+                )
+                if prob_pts >= config.PARLAY_MIN_LEG_PROB:
                     candidate_parlay_legs.append(
                         ParlayLeg(
                             player_name=pl["player_name"],
                             team_abbreviation=pl_team_abbr,
                             opponent=opp_abbr,
                             category="pts",
-                            line=line_pts,
+                            line=floor_pts,
                             direction="Over",
-                            odds=1.85,
+                            odds=mult_pts,
                             prob=prob_pts,
                             correlation_tag="STACK_PASS_SCORER" if is_home else "PACE_BOOST",
                         )
                     )
 
-            # Assists prop
-            if pl["ast"] >= 4.5:
+            # Assists: Línea de Piso Alternativa Draftea (P >= 75%)
+            if pl["ast"] >= 4.0:
                 dist_ast = props_model.fit_distribution(
                     player_name=pl["player_name"],
                     team_abbreviation=pl_team_abbr,
@@ -324,20 +348,49 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
                     team_pace=tm_stats.get("pace", 100.0),
                     expected_game_pace=sim_res.expected_pace,
                 )
-                line_ast = round(pl["ast"] - 0.5, 1)
-                prob_ast = props_model.calculate_over_prob(dist_ast, line_ast)
-                if prob_ast > 0.52:
+                floor_ast, prob_ast, mult_ast = props_model.find_alt_floor_line(
+                    dist_ast, min_prob=config.PARLAY_MIN_LEG_PROB
+                )
+                if prob_ast >= config.PARLAY_MIN_LEG_PROB:
                     candidate_parlay_legs.append(
                         ParlayLeg(
                             player_name=pl["player_name"],
                             team_abbreviation=pl_team_abbr,
                             opponent=opp_abbr,
                             category="ast",
-                            line=line_ast,
+                            line=floor_ast,
                             direction="Over",
-                            odds=1.88,
+                            odds=mult_ast,
                             prob=prob_ast,
                             correlation_tag="STACK_PASS_SCORER",
+                        )
+                    )
+
+            # Rebounds: Línea de Piso Alternativa Draftea (P >= 75%)
+            if pl.get("reb", 0) >= 5.0:
+                dist_reb = props_model.fit_distribution(
+                    player_name=pl["player_name"],
+                    team_abbreviation=pl_team_abbr,
+                    category="reb",
+                    baseline_stat=pl["reb"],
+                    team_pace=tm_stats.get("pace", 100.0),
+                    expected_game_pace=sim_res.expected_pace,
+                )
+                floor_reb, prob_reb, mult_reb = props_model.find_alt_floor_line(
+                    dist_reb, min_prob=config.PARLAY_MIN_LEG_PROB
+                )
+                if prob_reb >= config.PARLAY_MIN_LEG_PROB:
+                    candidate_parlay_legs.append(
+                        ParlayLeg(
+                            player_name=pl["player_name"],
+                            team_abbreviation=pl_team_abbr,
+                            opponent=opp_abbr,
+                            category="reb",
+                            line=floor_reb,
+                            direction="Over",
+                            odds=mult_reb,
+                            prob=prob_reb,
+                            correlation_tag="PACE_BOOST",
                         )
                     )
 
@@ -357,7 +410,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
     logger.info("Final approved Core institutional picks: %d", len(final_core_picks))
 
     # ==========================================
-    # SATELLITE PARLAY GENERATION
+    # SATELLITE PARLAY GENERATION (SOÑADORA DRAFTEA)
     # ==========================================
     spent_week = calculate_weekly_spent(config.HISTORY_DIR, target_date)
     best_parlay = parlay_builder.select_best_daily_ticket(
@@ -366,12 +419,23 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
     )
 
     # ==========================================
-    # PERSISTENCE & NOTIFICATION
+    # GATEKEEPER PRETEMPORADA, PERSISTENCIA & NOTIFICACIÓN
     # ==========================================
-    persist_picks_to_csv(final_core_picks, best_parlay, target_date)
+    target_dt_obj = datetime.strptime(target_date, "%Y-%m-%d").date()
+    is_preseason = target_dt_obj < config.REGULAR_SEASON_START_DATE
+
+    if is_preseason:
+        logger.warning(
+            "⚠️ MODO PRETEMPORADA DETECTADO (Fecha %s < %s). Operando en SANDBOX.",
+            target_date, config.REGULAR_SEASON_START_DATE
+        )
+
+    persist_picks_to_csv(final_core_picks, best_parlay, target_date, is_preseason=is_preseason)
 
     notifier = TelegramNotifier()
-    notifier.send_notification(final_core_picks, best_parlay, spent_this_week_mxn=spent_week)
+    notifier.send_notification(
+        final_core_picks, best_parlay, spent_this_week_mxn=spent_week, is_preseason=is_preseason
+    )
 
 
 def main() -> None:
