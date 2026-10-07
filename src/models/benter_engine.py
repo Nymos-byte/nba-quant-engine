@@ -34,6 +34,7 @@ class BetEvaluation:
     recommended_stake_amount: float
     is_approved: bool
     rejection_reason: Optional[str] = None
+    matchup: str = ""
 
 
 class BenterEngine:
@@ -95,6 +96,7 @@ class BenterEngine:
         decimal_odds: float,
         p_model: float,
         p_market_fair: float,
+        matchup: str = "",
     ) -> BetEvaluation:
         """
         Evaluates bet opportunity through Benter ensemble, computes edge, EV%,
@@ -151,6 +153,7 @@ class BenterEngine:
             recommended_stake_amount=stake_amount,
             is_approved=is_approved,
             rejection_reason=rejection_reason,
+            matchup=matchup,
         )
 
 

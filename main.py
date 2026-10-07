@@ -71,18 +71,13 @@ def persist_picks_to_csv(
     production 'todas_las_apuestas.csv'.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    if is_preseason:
-        logger.warning(
-            "⚠️ [SANDBOX PRETEMPORADA]: Guardado en producción omitido ('todas_las_apuestas.csv'). Registrando en sandbox_picks_%s.csv",
-            date_str,
-        )
-        out_file = output_dir / f"sandbox_picks_{date_str}.csv"
-    else:
-        out_file = output_dir / f"picks_{date_str}.csv"
+    # Active Paper Trading: always write to picks_{date_str}.csv
+    out_file = output_dir / f"picks_{date_str}.csv"
 
     fieldnames = [
         "date",
         "game_id",
+        "matchup",
         "bet_type",  # 'CORE_STRAIGHT' or 'SATELLITE_PARLAY'
         "market",
         "selection",
@@ -107,6 +102,7 @@ def persist_picks_to_csv(
         rows.append({
             "date": date_str,
             "game_id": p.game_id,
+            "matchup": p.matchup if p.matchup else p.game_id,
             "bet_type": "CORE_STRAIGHT",
             "market": p.market,
             "selection": p.selection,
@@ -133,6 +129,7 @@ def persist_picks_to_csv(
         rows.append({
             "date": date_str,
             "game_id": parlay.ticket_id,
+            "matchup": "PARLAY_DRAFTEA",
             "bet_type": "SATELLITE_PARLAY",
             "market": "player_props_parlay",
             "selection": parlay.ticket_id,
@@ -156,17 +153,16 @@ def persist_picks_to_csv(
         for r in rows:
             writer.writerow(r)
 
-    # Master production file (only updated when not in preseason mode)
-    if not is_preseason:
-        prod_master = output_dir / "todas_las_apuestas.csv"
-        file_exists = prod_master.exists()
-        with open(prod_master, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not file_exists:
-                writer.writeheader()
-            for r in rows:
-                writer.writerow(r)
-        logger.info("Updated master production record: %s", prod_master.name)
+    # Master production file (always updated for Paper Trading audit)
+    prod_master = output_dir / "todas_las_apuestas.csv"
+    file_exists = prod_master.exists()
+    with open(prod_master, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+    logger.info("Updated master production record: %s", prod_master.name)
 
     logger.info("Persisted %d approved picks to %s", len(rows), out_file.name)
     return out_file
@@ -214,6 +210,8 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
         total_m = markets.get("totals", {})
         h2h_m = markets.get("h2h", {})
 
+        matchup_str = f"{away_name} @ {home_name}"
+
         home_spread_line = None
         if home_name in spread_m:
             home_spread_line = spread_m[home_name].get("point")
@@ -244,6 +242,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
                 decimal_odds=home_market["odds"],
                 p_model=sim_res.home_win_prob,
                 p_market_fair=home_market["market_fair_prob"],
+                matchup=matchup_str,
             )
             candidate_bets.append(eval_home_ml)
 
@@ -255,6 +254,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
                 decimal_odds=away_market["odds"],
                 p_model=sim_res.away_win_prob,
                 p_market_fair=away_market["market_fair_prob"],
+                matchup=matchup_str,
             )
             candidate_bets.append(eval_away_ml)
 
@@ -269,6 +269,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
                 decimal_odds=home_sp_m["odds"],
                 p_model=p_model_cover,
                 p_market_fair=home_sp_m["market_fair_prob"],
+                matchup=matchup_str,
             )
             candidate_bets.append(eval_spread)
 
@@ -284,6 +285,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
                 decimal_odds=total_m["Over"]["odds"],
                 p_model=p_model_over,
                 p_market_fair=total_m["Over"]["market_fair_prob"],
+                matchup=matchup_str,
             )
             candidate_bets.append(eval_over)
 
@@ -294,6 +296,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
                 decimal_odds=total_m["Under"]["odds"],
                 p_model=p_model_under,
                 p_market_fair=total_m["Under"]["market_fair_prob"],
+                matchup=matchup_str,
             )
             candidate_bets.append(eval_under)
 

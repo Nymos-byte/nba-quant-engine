@@ -118,17 +118,18 @@ class TelegramNotifier:
         total_stake_amount = sum(p.recommended_stake_amount for p in core_picks)
 
         for p in core_picks:
+            partido_str = p.matchup if p.matchup else p.game_id
             lines.extend([
-                f"🏀 *Partido:* `{p.game_id}`",
+                f"🏀 *Partido:* *{partido_str}*",
                 f"🎯 *Mercado / Selección:* {p.market.upper()} ➔ *{p.selection}*",
                 f"📊 *Cuota:* `{p.odds:.2f}` | *P. Justa:* `{p.final_prob*100:.1f}%`",
                 f"📈 *Edge:* `+{p.edge*100:.2f}%` | *EV:* `+{p.ev_percent:.1f}%`",
-                f"💰 *Stake Quarter-Kelly:* `{p.recommended_stake_fraction*100:.2f}%` (${p.recommended_stake_amount:.2f} USD)",
+                f"💰 *Stake Quarter-Kelly:* `{p.recommended_stake_fraction*100:.2f}%` (${p.recommended_stake_amount:.2f} MXN)",
                 "─────────────────────────────",
             ])
 
         lines.append(
-            f"⚖️ *Exposición Total Core:* `{total_stake_fraction*100:.2f}%` (${total_stake_amount:.2f} USD)\n"
+            f"⚖️ *Exposición Total Core:* `{total_stake_fraction*100:.2f}%` (${total_stake_amount:.2f} MXN)\n"
         )
         return "\n".join(lines)
 
@@ -250,8 +251,7 @@ class TelegramNotifier:
             res = row.get("result", "PENDING")
             sel = row.get("selection", "")
             pnl_val = float(row.get("pnl", 0.0))
-            bet_type = row.get("bet_type", "CORE_STRAIGHT")
-            curr = "USD" if bet_type == "CORE_STRAIGHT" else "MXN"
+            curr = "MXN"
 
             icon = "✅" if res == "WON" else ("❌" if res == "LOST" else "⚪")
             pnl_str = f"+${pnl_val:.2f} {curr}" if pnl_val > 0 else (f"-${abs(pnl_val):.2f} {curr}" if pnl_val < 0 else f"$0.00 {curr}")

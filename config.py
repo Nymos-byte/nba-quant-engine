@@ -40,11 +40,13 @@ BASELINE_SEASON: str = "2025-26"
 # ==========================================
 # CORE QUANTITATIVE PARAMETERS (INSTITUTIONAL)
 # ==========================================
-BANKROLL_CORE: float = float(os.getenv("BANKROLL_CORE", "1000.0"))
+BANKROLL_CORE: float = float(os.getenv("BANKROLL_CORE", "1000.0"))  # Pesos Mexicanos (MXN)
 KELLY_FRACTION: float = 0.25  # Quarter-Kelly
 MAX_KELLY_STAKE: float = 0.0175  # 1.75% hard ceiling per bet
 MIN_KELLY_STAKE: float = 0.0100  # 1.00% hard floor per bet (below this, stake is 0.0)
 MAX_DAILY_EXPOSURE: float = 0.100  # 10.0% max total daily exposure
+MIN_BET_AMOUNT_MXN: float = 5.0  # Piso mínimo por apuesta en Draftea / casas MXN ($5.00 MXN)
+MAX_DAILY_CORE_BETS: int = 6  # Máximo de posiciones Core de alta convicción por día (evita dilución)
 MIN_EDGE: float = 0.040  # 4.0% minimum edge over fair market
 MIN_EV_PERCENT: float = 5.0  # 5.0% minimum expected value
 HOME_COURT_ADVANTAGE: float = 2.8  # Net points advantage for home team
@@ -92,6 +94,8 @@ class RiskConstraints:
     home_court_advantage: float = HOME_COURT_ADVANTAGE
     benter_weight_model: float = BENTER_WEIGHT_MODEL
     benter_weight_market: float = BENTER_WEIGHT_MARKET
+    min_bet_amount_mxn: float = MIN_BET_AMOUNT_MXN
+    max_daily_core_bets: int = MAX_DAILY_CORE_BETS
 
 
 @dataclass(frozen=True)
