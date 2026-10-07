@@ -191,3 +191,70 @@ class RatingEngine:
             total_lines=total_lines,
         )
         return res
+
+
+def calculate_game_metrics(
+    team_stats: Dict[str, Any],
+    opponent_stats: Dict[str, Any],
+    game_minutes: float = 48.0,
+) -> Dict[str, float]:
+    """
+    Computes Dean Oliver's Four Factors and fundamental team game metrics from raw stats:
+    - Possessions: FGA + 0.44 * FTA - OREB + TO
+    - Pace: (Possessions / Game Minutes) * 48.0
+    - Offensive Rating (ORtg): 100 * (Points / Possessions)
+    - Defensive Rating (DRtg): 100 * (Opponent Points / Opponent Possessions)
+    - Effective Field Goal % (eFG%): (FGM + 0.5 * 3PM) / FGA
+    - Turnover % (TOV%): TO / (FGA + 0.44 * FTA + TO)
+    - Offensive Rebound % (ORB%): OREB / (OREB + Opponent DREB)
+    - Free Throw Rate: FTA / FGA
+    """
+    fga = float(team_stats.get("fga", 0.0))
+    fta = float(team_stats.get("fta", 0.0))
+    oreb = float(team_stats.get("oreb", 0.0))
+    to = float(team_stats.get("to", 0.0))
+    pts = float(team_stats.get("pts", 0.0))
+    fgm = float(team_stats.get("fgm", 0.0))
+    fg3m = float(team_stats.get("fg3m", 0.0))
+
+    opp_fga = float(opponent_stats.get("fga", 0.0))
+    opp_fta = float(opponent_stats.get("fta", 0.0))
+    opp_oreb = float(opponent_stats.get("oreb", 0.0))
+    opp_dreb = float(opponent_stats.get("dreb", 0.0))
+    opp_to = float(opponent_stats.get("to", 0.0))
+    opp_pts = float(opponent_stats.get("pts", 0.0))
+
+    # Dean Oliver Possessions formula
+    poss = max(1.0, fga + 0.44 * fta - oreb + to)
+    opp_poss = max(1.0, opp_fga + 0.44 * opp_fta - opp_oreb + opp_to)
+
+    # Pace normalized to 48 regulation minutes
+    minutes = max(1.0, game_minutes)
+    pace = (poss / minutes) * 48.0
+
+    # Ratings per 100 possessions
+    ortg = 100.0 * (pts / poss)
+    drtg = 100.0 * (opp_pts / opp_poss)
+
+    # Additional Dean Oliver Four Factors
+    efg_pct = (fgm + 0.5 * fg3m) / fga if fga > 0 else 0.0
+    tov_denom = fga + 0.44 * fta + to
+    tov_pct = to / tov_denom if tov_denom > 0 else 0.0
+    reb_denom = oreb + opp_dreb
+    orb_pct = oreb / reb_denom if reb_denom > 0 else 0.0
+    ft_rate = fta / fga if fga > 0 else 0.0
+
+    return {
+        "possessions": round(poss, 2),
+        "opponent_possessions": round(opp_poss, 2),
+        "pace": round(pace, 2),
+        "ortg": round(ortg, 2),
+        "drtg": round(drtg, 2),
+        "pts": pts,
+        "opponent_pts": opp_pts,
+        "efg_pct": round(efg_pct, 4),
+        "tov_pct": round(tov_pct, 4),
+        "orb_pct": round(orb_pct, 4),
+        "ft_rate": round(ft_rate, 4),
+    }
+

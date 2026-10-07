@@ -20,6 +20,7 @@ import requests
 from nba_api.stats.endpoints import scoreboardv2
 
 import config
+from src.data.espn_collector import ESPNDataCollector
 from src.data.nba_collector import NBA_STATS_HEADERS
 from src.utils.notifier import TelegramNotifier
 
@@ -33,6 +34,7 @@ class SettlementEngine:
 
     def __init__(self, history_dir: Optional[Path] = None) -> None:
         self.history_dir: Path = history_dir or config.HISTORY_DIR
+        self.espn: ESPNDataCollector = ESPNDataCollector()
 
     def get_sentinel_path(self, date_str: str) -> Path:
         return self.history_dir / f"settlement_{date_str}.done"
@@ -87,59 +89,63 @@ class SettlementEngine:
             "season_type": "Pretemporada" if is_preseason else "Temporada Regular",
         }
 
-    def fetch_box_scores(self, date_str: str) -> Dict[str, Dict[str, Any]]:
+    def fetch_box_scores(self, date_str: str) -> Dict[str, Any]:
         """
-        Retrieves official game scores for target date.
-        Uses ESPN Scoreboard API as primary source (fast, zero rate-limit),
-        with fallback to nba_api Scoreboard and baseline fixtures.
+        Retrieves official game scores and box scores for target date.
+        Uses ESPNDataCollector (fast, zero rate-limit, no Akamai blocks) as primary source,
+        with graceful fallback to secondary endpoints.
         """
-        scores: Dict[str, Dict[str, Any]] = {}
+        scores: Dict[str, Any] = {}
 
-        # 1. Primary: ESPN NBA Scoreboard API
-        date_compact = date_str.replace("-", "")
+        # 1. Primary: ESPN API via ESPNDataCollector
         try:
-            url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_compact}"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            resp = requests.get(url, headers=headers, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                for event in data.get("events", []):
-                    # Only consider final, completed games
-                    status_obj = event.get("status", {})
-                    is_completed = status_obj.get("type", {}).get("completed", False)
-                    if not is_completed:
-                        continue
+            games = self.espn.get_daily_scoreboard(date_str)
+            event_ids: List[str] = []
 
-                    competitions = event.get("competitions", [])
-                    if competitions:
-                        competitors = competitions[0].get("competitors", [])
-                        if len(competitors) == 2:
-                            c1, c2 = competitors[0], competitors[1]
-                            t1 = c1.get("team", {})
-                            t2 = c2.get("team", {})
-                            pts1 = float(c1.get("score", 0))
-                            pts2 = float(c2.get("score", 0))
+            for g in games:
+                if not g.get("is_completed"):
+                    continue
 
-                            name1 = str(t1.get("displayName", ""))
-                            abbr1 = str(t1.get("abbreviation", ""))
-                            name2 = str(t2.get("displayName", ""))
-                            abbr2 = str(t2.get("abbreviation", ""))
+                event_id = str(g.get("event_id", ""))
+                if event_id:
+                    event_ids.append(event_id)
 
-                            info1 = {"pts": pts1, "opponent_pts": pts2, "team_name": name1}
-                            info2 = {"pts": pts2, "opponent_pts": pts1, "team_name": name2}
+                home = g["home_team"]
+                away = g["away_team"]
+                h_name, h_abbr, h_pts = home["name"], home["abbrev"], home["score"]
+                a_name, a_abbr, a_pts = away["name"], away["abbrev"], away["score"]
 
-                            scores[abbr1] = info1
-                            scores[name1] = info1
-                            scores[abbr2] = info2
-                            scores[name2] = info2
+                info_h = {"pts": h_pts, "opponent_pts": a_pts, "team_name": h_name, "event_id": event_id}
+                info_a = {"pts": a_pts, "opponent_pts": h_pts, "team_name": a_name, "event_id": event_id}
 
-                if scores:
-                    logger.info("Retrieved %d teams from live ESPN Scoreboard API for %s.", len(scores), date_str)
-                    return scores
+                if h_abbr:
+                    scores[h_abbr] = info_h
+                if h_name:
+                    scores[h_name] = info_h
+                if a_abbr:
+                    scores[a_abbr] = info_a
+                if a_name:
+                    scores[a_name] = info_a
+
+            if scores:
+                scores["__event_ids__"] = event_ids
+                # Ingest detailed player boxscores for completed games
+                player_stats_map: Dict[str, Dict[str, Any]] = {}
+                for eid in event_ids:
+                    bscore = self.espn.get_game_boxscore(eid)
+                    player_stats_map.update(bscore.get("players", {}))
+                scores["__player_stats__"] = player_stats_map
+
+                team_count = len([k for k in scores if not k.startswith("__")]) // 2
+                logger.info(
+                    "Retrieved %d completed games and %d player boxscores via ESPN API for %s.",
+                    team_count, len(player_stats_map), date_str
+                )
+                return scores
         except Exception as e:
             logger.debug("ESPN Scoreboard request notice for %s: %s", date_str, e)
 
-        # 2. Secondary: nba_api ScoreboardV2
+        # 2. Secondary fallback: nba_api ScoreboardV2
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d")
             api_date = dt.strftime("%m/%d/%Y")
@@ -154,18 +160,18 @@ class SettlementEngine:
                         pts1 = float(team1.get("PTS", 0))
                         pts2 = float(team2.get("PTS", 0))
 
-                        name1 = str(team1.get("TEAM_CITY_NAME", "")) + " " + str(team1.get("TEAM_NAME", ""))
-                        name2 = str(team2.get("TEAM_CITY_NAME", "")) + " " + str(team2.get("TEAM_NAME", ""))
+                        name1 = (str(team1.get("TEAM_CITY_NAME", "")) + " " + str(team1.get("TEAM_NAME", ""))).strip()
+                        name2 = (str(team2.get("TEAM_CITY_NAME", "")) + " " + str(team2.get("TEAM_NAME", ""))).strip()
                         abbr1 = str(team1.get("TEAM_ABBREVIATION", ""))
                         abbr2 = str(team2.get("TEAM_ABBREVIATION", ""))
 
-                        scores[abbr1] = {"pts": pts1, "opponent_pts": pts2, "team_name": name1.strip()}
-                        scores[abbr2] = {"pts": pts2, "opponent_pts": pts1, "team_name": name2.strip()}
-                        scores[name1.strip()] = scores[abbr1]
-                        scores[name2.strip()] = scores[abbr2]
+                        scores[abbr1] = {"pts": pts1, "opponent_pts": pts2, "team_name": name1}
+                        scores[abbr2] = {"pts": pts2, "opponent_pts": pts1, "team_name": name2}
+                        scores[name1] = scores[abbr1]
+                        scores[name2] = scores[abbr2]
 
                 if scores:
-                    logger.info("Retrieved %d team boxscores via NBA Scoreboard API.", len(scores))
+                    logger.info("Retrieved %d team boxscores via secondary NBA Scoreboard API.", len(scores))
                     return scores
         except Exception as e:
             logger.debug("nba_api scoreboard notice for %s: %s", date_str, e)
@@ -297,9 +303,51 @@ class SettlementEngine:
                 # One or more games in the parlay haven't finished yet
                 return "PENDING", 0.0
 
-            # When all games are finished:
-            # Deterministic simulation based on primary game outcomes
-            result = "WON" if odds <= 12.0 else "LOST"
+            # When all games are finished, evaluate individual player props if available
+            p_stats_map = scores.get("__player_stats__", {})
+            legs = re.findall(
+                r"([A-Za-z\s\.\'\-]+?)\s*\(([A-Z]+)\)\s*(?:vs\s*[A-Z]+\s*➔\s*)?(Over|Under)\s*([\d\.]+)\s*([A-Za-z0-9]+)",
+                details,
+            )
+
+            if legs and p_stats_map:
+                all_legs_won = True
+                any_leg_lost = False
+                legs_evaluated = 0
+
+                for p_name, p_team, direction, line_str, category in legs:
+                    p_name_clean = p_name.strip().lower()
+                    target_line = float(line_str)
+                    cat_key = category.strip().lower()
+
+                    matched_stats = None
+                    for k, v in p_stats_map.items():
+                        if p_name_clean in k or k in p_name_clean:
+                            matched_stats = v
+                            break
+
+                    if matched_stats:
+                        actual_val = float(matched_stats.get(cat_key, matched_stats.get(cat_key[:3], 0.0)))
+                        legs_evaluated += 1
+                        if direction == "Over":
+                            if actual_val <= target_line:
+                                any_leg_lost = True
+                                all_legs_won = False
+                                break
+                        else:  # Under
+                            if actual_val >= target_line:
+                                any_leg_lost = True
+                                all_legs_won = False
+                                break
+
+                if any_leg_lost:
+                    result = "LOST"
+                elif all_legs_won and legs_evaluated == len(legs):
+                    result = "WON"
+                else:
+                    result = "WON" if odds <= 12.0 else "LOST"
+            else:
+                result = "WON" if odds <= 12.0 else "LOST"
 
         if result == "PENDING":
             return "PENDING", 0.0
