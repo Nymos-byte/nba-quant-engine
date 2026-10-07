@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: 📥 Clonar repositorio
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 🐍 Configurar Python 3.11
         uses: actions/setup-python@v5
@@ -64,5 +66,6 @@ jobs:
             echo "No hay cambios en el historial para commitear."
           else
             git commit -m "chore(history): actualizar picks y liquidaciones diarias [skip ci]"
-            git push
+            git pull --rebase origin main
+            git push origin main
           fi

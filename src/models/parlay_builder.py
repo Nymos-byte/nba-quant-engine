@@ -1,7 +1,7 @@
 """
 Correlated Parlay Generator for Recreational High-Odds Tickets (Draftea / DFS).
 Enforces positive correlation stacking (Game Script, Pace, Usage)
-and validates combined odds strictly within [8.0, 25.0] range.
+and validates combined odds >= 8.0 without upper ceiling (unlimited dream odds).
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ class ParlayBuilder:
     ) -> List[ParlayTicket]:
         """
         Generates candidate parlays of 3 to 4 legs and retains those
-        satisfying the strict odds boundary [8.0, 25.0].
+        satisfying the minimum odds threshold (>= 8.0, uncapped).
         """
         if (spent_this_week_mxn + self.fixed_stake_mxn) > self.weekly_budget_mxn:
             logger.warning(
@@ -139,7 +139,7 @@ class ParlayBuilder:
 
                 combined_odds = self.calculate_combined_odds(legs)
 
-                # Odds boundary check: strictly between 8.0 and 25.0
+                # Odds boundary check: strictly >= min_odds (without upper ceiling)
                 if self.min_odds <= combined_odds <= self.max_odds:
                     score, rationale = self.assess_correlation_score(legs)
                     # We prefer combinations with positive synergy (score > 0)
@@ -155,8 +155,8 @@ class ParlayBuilder:
                     valid_tickets.append((score, ticket))
                     ticket_counter += 1
 
-        # Sort by correlation score descending, then by odds closeness to midpoint (~14.0)
-        valid_tickets.sort(key=lambda item: (item[0], -abs(item[1].combined_odds - 14.0)), reverse=True)
+        # Sort by correlation score descending, then by highest combined odds descending
+        valid_tickets.sort(key=lambda item: (item[0], item[1].combined_odds), reverse=True)
         return [item[1] for item in valid_tickets]
 
     def select_best_daily_ticket(

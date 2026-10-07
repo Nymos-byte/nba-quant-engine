@@ -29,7 +29,7 @@ El sistema opera bajo un enfoque desacoplado **Core & Satellite**:
            [ Core Quant Engine ]                                 [ Satellite Parlays ]
           - Straight Bets (+EV)                                 - Player Props Combinations
           - Moneyline / Spread / Totals                         - Draftea / DFS Rules
-          - Quarter-Kelly (1.0% - 1.75%)                        - Odds: 8.0 - 25.0
+          - Quarter-Kelly (1.0% - 1.75%)                        - Odds: >= 8.0 (Sin limite superior)
           - Max 10% daily exposure                              - Weekly budget: $150 MXN ($20/ticket)
                       │                                                     │
                       └──────────────────────────┬──────────────────────────┘
@@ -62,7 +62,7 @@ El sistema opera bajo un enfoque desacoplado **Core & Satellite**:
 - **Parámetros Financieros:**
   - Presupuesto semanal: \$150 MXN.
   - Apuesta fija: \$20 MXN por boleto.
-  - Rango de cuotas combinadas: Estrictamente entre 8.0 y 25.0 (+700 a +2400).
+  - Rango de cuotas combinadas: Minimo 8.0 (+700), sin limite superior.
   - Número de patas: 3 a 4 selecciones correlacionadas.
 
 ---
@@ -149,7 +149,7 @@ python main.py
 - Descarga y valida métricas actualizadas de la NBA y cuotas de mercado.
 - Ejecuta las simulaciones Monte Carlo y el ensamble Benter.
 - Aplica los candados de riesgo (deduplicación por partido, techo diario del 10%, Quarter-Kelly).
-- Genera el parlay recreativo Draftea con cuota entre 8.0 y 25.0.
+- Genera el parlay recreativo Draftea con cuota >= 8.0 (sin limite superior).
 - Guarda las apuestas aprobadas en `data/history/picks_YYYY-MM-DD.csv`.
 - Envía el reporte formateado a Telegram o lo imprime en consola.
 
@@ -175,7 +175,7 @@ Cobertura de pruebas:
 - `tests/test_risk_management.py`: Truncamiento en 1.75%, descarte < 1.00%, reescalado diario $\le 10\%$, deduplicación estricta.
 - `tests/test_rating_engine.py`: Proyección de posesiones, ratings ofensivos/defensivos, HCA (2.8 pts), convergencia Monte Carlo.
 - `tests/test_benter_engine.py`: De-vigging de cuotas, ensamble Benter, cálculo de Edge, EV% y Quarter-Kelly.
-- `tests/test_parlays.py`: Construcción de combinadas correlacionadas, rango de cuotas (8.0 a 25.0), evaluación de líneas alternativas y detección de trampas.
+- `tests/test_parlays.py`: Construcción de combinadas correlacionadas, cuotas minimas (>= 8.0, sin techo), evaluación de líneas alternativas y detección de trampas.
 
 ---
 

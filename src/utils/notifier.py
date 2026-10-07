@@ -66,7 +66,7 @@ class TelegramNotifier:
         if not parlay:
             return (
                 "🎰 *[ACTION PARLAY - DRAFTEA / FUN]*\n"
-                "_Sin combinada que satisfaga correlación positiva o rango [8.0 - 25.0] hoy._\n"
+                "_Sin combinada que satisfaga correlación positiva o cuota >= 8.0 hoy._\n"
             )
 
         current_spend = spent_this_week_mxn + parlay.stake_mxn

@@ -71,8 +71,8 @@ def test_line_evaluator_positive_value():
 
 
 def test_parlay_builder_odds_boundaries():
-    """Verify generated parlays fall strictly within [8.0, 25.0] combined odds and require P >= 0.75."""
-    builder = ParlayBuilder(min_odds=8.0, max_odds=25.0, fixed_stake_mxn=20.0, min_leg_prob=0.75)
+    """Verify generated parlays fall with combined odds >= 8.0 (no upper ceiling) and require P >= 0.75."""
+    builder = ParlayBuilder(min_odds=8.0, max_odds=float("inf"), fixed_stake_mxn=20.0, min_leg_prob=0.75)
 
     # Candidate legs with floor probability >= 75%
     candidate_legs = [
@@ -87,12 +87,30 @@ def test_parlay_builder_odds_boundaries():
 
     assert len(tickets) > 0
     for t in tickets:
-        assert 8.0 <= t.combined_odds <= 25.0
+        assert t.combined_odds >= 8.0
         assert 3 <= len(t.legs) <= 4
         assert t.stake_mxn == 20.0
         assert t.is_valid is True
         for leg in t.legs:
             assert leg.prob >= 0.75
+
+
+def test_parlay_builder_accepts_very_high_odds_uncapped():
+    """Verify ParlayBuilder does not cap odds at 25.0 and accepts very high combined odds (e.g. > 30.0)."""
+    builder = ParlayBuilder(min_odds=8.0, max_odds=float("inf"), fixed_stake_mxn=20.0, min_leg_prob=0.75)
+
+    high_odds_legs = [
+        ParlayLeg("Luka Doncic", "DAL", "BOS", "pts", 24.5, "Over", 2.50, 0.76, "STACK_PASS_SCORER"),
+        ParlayLeg("Kyrie Irving", "DAL", "BOS", "ast", 3.5, "Over", 2.40, 0.75, "STACK_PASS_SCORER"),
+        ParlayLeg("Jayson Tatum", "BOS", "DAL", "pts", 20.5, "Over", 2.50, 0.78, "PACE_BOOST"),
+        ParlayLeg("Nikola Jokic", "DEN", "OKC", "ast", 7.5, "Over", 2.30, 0.80, "PACE_BOOST"),
+    ]
+
+    tickets = builder.build_correlated_parlays(high_odds_legs)
+    assert len(tickets) > 0
+    # Combined odds of 4 legs: 2.5 * 2.4 * 2.5 * 2.3 = 34.50
+    has_ultra_high = any(t.combined_odds > 25.0 for t in tickets)
+    assert has_ultra_high is True
 
 
 def test_parlay_builder_rejects_sub_75_probability_legs():
