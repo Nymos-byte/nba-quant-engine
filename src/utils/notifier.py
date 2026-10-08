@@ -225,16 +225,15 @@ class TelegramNotifier:
         historical_stats: Optional[dict] = None,
         is_preseason: bool = False,
     ) -> bool:
-        """Formats and transmits the daily settlement report via Telegram."""
+        """Formats and transmits the daily settlement report via Telegram, separating Core from Satellite bets."""
         won = summary.get("won", 0)
         lost = summary.get("lost", 0)
         push = summary.get("push", 0)
         total_pnl = summary.get("total_pnl", 0.0)
         roi = summary.get("roi_percent", 0.0)
-        total_bets = won + lost + push
         winrate = (won / (won + lost) * 100.0) if (won + lost) > 0 else 0.0
 
-        pnl_symbol = "🟢 +" if total_pnl >= 0 else "🔴 "
+        pnl_symbol = "🟢 +" if total_pnl >= 0 else "🔴 -"
 
         lines = []
         if is_preseason:
@@ -244,41 +243,148 @@ class TelegramNotifier:
             "📊 *NBA QUANT ENGINE - LIQUIDACIÓN DE RESULTADOS*",
             f"📅 *Fecha:* `{target_date}`",
             "─────────────────────────────",
-            f"🏆 *Récord del Día:* `{won}W - {lost}L - {push}P`",
-            f"🎯 *Winrate Real:* `{winrate:.1f}%`",
-            f"💰 *PnL Neto:* *{pnl_symbol}${abs(total_pnl):.2f}*",
-            f"📈 *ROI del Día:* *{roi:+.2f}%*",
+        ])
+
+        # Separate Core Quant vs Soñadora Draftea in Daily Summary
+        core = summary.get("core")
+        sat = summary.get("satellite")
+
+        if core and (core.get("won", 0) + core.get("lost", 0) + core.get("push", 0) > 0):
+            c_won = core.get("won", 0)
+            c_lost = core.get("lost", 0)
+            c_push = core.get("push", 0)
+            c_pnl = core.get("total_pnl", 0.0)
+            c_roi = core.get("roi_percent", 0.0)
+            c_wr = core.get("winrate", 0.0)
+            c_sym = "🟢 +" if c_pnl >= 0 else "🔴 -"
+
+            lines.extend([
+                "🟢 *CORE QUANT (Benter + Kelly):*",
+                f"• Récord: `{c_won}W - {c_lost}L - {c_push}P` ({c_wr:.1f}%)",
+                f"• PnL: *{c_sym}${abs(c_pnl):.2f} MXN*",
+                f"• ROI: *{c_roi:+.2f}%*",
+                "─────────────────────────────",
+            ])
+
+        if sat and (sat.get("won", 0) + sat.get("lost", 0) + sat.get("push", 0) > 0):
+            s_won = sat.get("won", 0)
+            s_lost = sat.get("lost", 0)
+            s_push = sat.get("push", 0)
+            s_pnl = sat.get("total_pnl", 0.0)
+            s_roi = sat.get("roi_percent", 0.0)
+            s_wr = sat.get("winrate", 0.0)
+            s_sym = "🟢 +" if s_pnl >= 0 else "🔴 -"
+
+            lines.extend([
+                "🎰 *SOÑADORA (Draftea / Parlay):*",
+                f"• Récord: `{s_won}W - {s_lost}L - {s_push}P` ({s_wr:.1f}%)",
+                f"• PnL: *{s_sym}${abs(s_pnl):.2f} MXN*",
+                f"• ROI: *{s_roi:+.2f}%*",
+                "─────────────────────────────",
+            ])
+
+        lines.extend([
+            "⚖️ *BALANCE TOTAL DEL DÍA:*",
+            f"• Récord Global: `{won}W - {lost}L - {push}P` ({winrate:.1f}%)",
+            f"• PnL Neto: *{pnl_symbol}${abs(total_pnl):.2f} MXN*",
+            f"• ROI del Día: *{roi:+.2f}%*",
             "─────────────────────────────",
             "*Detalle de Posiciones:*",
         ])
 
-        for row in settled_rows:
+        # Separate positions into Core and Soñadora in detail list
+        core_rows = [
+            r for r in settled_rows
+            if not (
+                str(r.get("bet_type", "")).upper() == "SATELLITE_PARLAY"
+                or str(r.get("market", "")).lower() == "player_props_parlay"
+                or "PARLAY" in str(r.get("selection", "")).upper()
+            )
+        ]
+        sat_rows = [
+            r for r in settled_rows
+            if (
+                str(r.get("bet_type", "")).upper() == "SATELLITE_PARLAY"
+                or str(r.get("market", "")).lower() == "player_props_parlay"
+                or "PARLAY" in str(r.get("selection", "")).upper()
+            )
+        ]
+
+        def _format_pos(row: dict) -> str:
             res = row.get("result", "PENDING")
             sel = row.get("selection", "")
             pnl_val = float(row.get("pnl", 0.0))
             curr = "MXN"
-
             icon = "✅" if res == "WON" else ("❌" if res == "LOST" else "⚪")
             pnl_str = f"+${pnl_val:.2f} {curr}" if pnl_val > 0 else (f"-${abs(pnl_val):.2f} {curr}" if pnl_val < 0 else f"$0.00 {curr}")
+            return f"  {icon} *{sel}*: `{pnl_str}` ({res})"
 
-            lines.append(f"  {icon} *{sel}*: `{pnl_str}` ({res})")
+        if core_rows:
+            lines.append("🟢 _Core Quant:_")
+            for r in core_rows:
+                lines.append(_format_pos(r))
+
+        if sat_rows:
+            lines.append("🎰 _Soñadora Draftea:_")
+            for r in sat_rows:
+                lines.append(_format_pos(r))
+
+        if not core_rows and not sat_rows:
+            for r in settled_rows:
+                lines.append(_format_pos(r))
 
         if historical_stats:
+            season_lbl = historical_stats.get("season_type", "Pretemporada" if is_preseason else "Temporada Regular")
+            lines.extend([
+                "─────────────────────────────",
+                f"🏦 *Métricas Históricas ({season_lbl}):*",
+            ])
+
+            h_core = historical_stats.get("core")
+            h_sat = historical_stats.get("satellite")
+
+            if h_core and (h_core.get("won", 0) + h_core.get("lost", 0) + h_core.get("push", 0) > 0):
+                hc_won = h_core.get("won", 0)
+                hc_lost = h_core.get("lost", 0)
+                hc_push = h_core.get("push", 0)
+                hc_pnl = h_core.get("total_pnl", 0.0)
+                hc_roi = h_core.get("roi_percent", 0.0)
+                hc_wr = h_core.get("winrate", 0.0)
+                hc_sym = "🟢 +" if hc_pnl >= 0 else "🔴 -"
+
+                lines.extend([
+                    "🟢 *Core Quant Acumulado:*",
+                    f"• Récord: `{hc_won}W - {hc_lost}L - {hc_push}P` ({hc_wr:.1f}%)",
+                    f"• PnL: *{hc_sym}${abs(hc_pnl):.2f} MXN* | ROI: *{hc_roi:+.2f}%*",
+                ])
+
+            if h_sat and (h_sat.get("won", 0) + h_sat.get("lost", 0) + h_sat.get("push", 0) > 0):
+                hs_won = h_sat.get("won", 0)
+                hs_lost = h_sat.get("lost", 0)
+                hs_push = h_sat.get("push", 0)
+                hs_pnl = h_sat.get("total_pnl", 0.0)
+                hs_roi = h_sat.get("roi_percent", 0.0)
+                hs_wr = h_sat.get("winrate", 0.0)
+                hs_sym = "🟢 +" if hs_pnl >= 0 else "🔴 -"
+
+                lines.extend([
+                    "🎰 *Soñadora Acumulado:*",
+                    f"• Récord: `{hs_won}W - {hs_lost}L - {hs_push}P` ({hs_wr:.1f}%)",
+                    f"• PnL: *{hs_sym}${abs(hs_pnl):.2f} MXN* | ROI: *{hs_roi:+.2f}%*",
+                ])
+
             h_won = historical_stats.get("won", 0)
             h_lost = historical_stats.get("lost", 0)
             h_push = historical_stats.get("push", 0)
             h_pnl = historical_stats.get("total_pnl", 0.0)
             h_roi = historical_stats.get("roi_percent", 0.0)
             h_wr = (h_won / (h_won + h_lost) * 100.0) if (h_won + h_lost) > 0 else 0.0
-            h_symbol = "🟢 +" if h_pnl >= 0 else "🔴 "
-            season_lbl = historical_stats.get("season_type", "Pretemporada" if is_preseason else "Temporada Regular")
+            h_symbol = "🟢 +" if h_pnl >= 0 else "🔴 -"
 
             lines.extend([
-                "─────────────────────────────",
-                f"🏦 *Métricas Históricas ({season_lbl}):*",
-                f"• Récord Global: `{h_won}W - {h_lost}L - {h_push}P` ({h_wr:.1f}%)",
-                f"• PnL Acumulado: *{h_symbol}${abs(h_pnl):.2f}*",
-                f"• ROI Acumulado: *{h_roi:+.2f}%*",
+                "⚖️ *Balance Global Acumulado:*",
+                f"• Récord Total: `{h_won}W - {h_lost}L - {h_push}P` ({h_wr:.1f}%)",
+                f"• PnL Neto: *{h_symbol}${abs(h_pnl):.2f} MXN* | ROI: *{h_roi:+.2f}%*",
             ])
 
         lines.append("─────────────────────────────")

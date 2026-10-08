@@ -45,8 +45,16 @@ class SettlementEngine:
     def is_already_settled(self, date_str: str) -> bool:
         return self.get_sentinel_path(date_str).exists()
 
+    @staticmethod
+    def is_satellite_bet(row: dict) -> bool:
+        """Determines if a bet row is a satellite / soñadora parlay."""
+        btype = str(row.get("bet_type", "")).upper()
+        market = str(row.get("market", "")).lower()
+        sel = str(row.get("selection", "")).upper()
+        return btype == "SATELLITE_PARLAY" or market == "player_props_parlay" or "PARLAY" in sel
+
     def compute_historical_stats(self, is_preseason: bool = False) -> Dict[str, Any]:
-        """Calculates cumulative performance metrics from the designated master CSV."""
+        """Calculates cumulative performance metrics from the designated master CSV, separated into Core and Satellite."""
         master_name = "preseason_apuestas.csv" if is_preseason else "todas_las_apuestas.csv"
         master_file = self.history_dir / master_name
 
@@ -56,6 +64,18 @@ class SettlementEngine:
         total_pnl = 0.0
         total_staked = 0.0
 
+        core_won = 0
+        core_lost = 0
+        core_push = 0
+        core_pnl = 0.0
+        core_staked = 0.0
+
+        sat_won = 0
+        sat_lost = 0
+        sat_push = 0
+        sat_pnl = 0.0
+        sat_staked = 0.0
+
         if master_file.exists():
             try:
                 df = pd.read_csv(master_file)
@@ -64,21 +84,46 @@ class SettlementEngine:
                         res = str(row.get("result", "")).upper()
                         pnl_val = float(row.get("pnl", 0.0))
                         stake_val = float(row.get("stake_amount", 0.0))
-                        if res == "WON":
-                            total_won += 1
+                        is_sat = self.is_satellite_bet(row.to_dict())
+
+                        if res in ("WON", "LOST", "PUSH"):
+                            total_staked += stake_val
                             total_pnl += pnl_val
-                            total_staked += stake_val
-                        elif res == "LOST":
-                            total_lost += 1
-                            total_pnl += pnl_val
-                            total_staked += stake_val
-                        elif res == "PUSH":
-                            total_push += 1
-                            total_staked += stake_val
+
+                            if res == "WON":
+                                total_won += 1
+                            elif res == "LOST":
+                                total_lost += 1
+                            elif res == "PUSH":
+                                total_push += 1
+
+                            if is_sat:
+                                sat_staked += stake_val
+                                sat_pnl += pnl_val
+                                if res == "WON":
+                                    sat_won += 1
+                                elif res == "LOST":
+                                    sat_lost += 1
+                                elif res == "PUSH":
+                                    sat_push += 1
+                            else:
+                                core_staked += stake_val
+                                core_pnl += pnl_val
+                                if res == "WON":
+                                    core_won += 1
+                                elif res == "LOST":
+                                    core_lost += 1
+                                elif res == "PUSH":
+                                    core_push += 1
             except Exception as e:
                 logger.debug("Error computing historical stats from %s: %s", master_file.name, e)
 
         roi = (total_pnl / total_staked * 100.0) if total_staked > 0 else 0.0
+        core_roi = (core_pnl / core_staked * 100.0) if core_staked > 0 else 0.0
+        core_wr = (core_won / (core_won + core_lost) * 100.0) if (core_won + core_lost) > 0 else 0.0
+        sat_roi = (sat_pnl / sat_staked * 100.0) if sat_staked > 0 else 0.0
+        sat_wr = (sat_won / (sat_won + sat_lost) * 100.0) if (sat_won + sat_lost) > 0 else 0.0
+
         return {
             "won": total_won,
             "lost": total_lost,
@@ -87,6 +132,24 @@ class SettlementEngine:
             "total_staked": round(total_staked, 2),
             "roi_percent": round(roi, 2),
             "season_type": "Pretemporada" if is_preseason else "Temporada Regular",
+            "core": {
+                "won": core_won,
+                "lost": core_lost,
+                "push": core_push,
+                "total_pnl": round(core_pnl, 2),
+                "total_staked": round(core_staked, 2),
+                "roi_percent": round(core_roi, 2),
+                "winrate": round(core_wr, 1),
+            },
+            "satellite": {
+                "won": sat_won,
+                "lost": sat_lost,
+                "push": sat_push,
+                "total_pnl": round(sat_pnl, 2),
+                "total_staked": round(sat_staked, 2),
+                "roi_percent": round(sat_roi, 2),
+                "winrate": round(sat_wr, 1),
+            },
         }
 
     def fetch_box_scores(self, date_str: str) -> Dict[str, Any]:
@@ -417,6 +480,18 @@ class SettlementEngine:
         lost_count = 0
         push_count = 0
 
+        core_won = 0
+        core_lost = 0
+        core_push = 0
+        core_pnl = 0.0
+        core_staked = 0.0
+
+        sat_won = 0
+        sat_lost = 0
+        sat_push = 0
+        sat_pnl = 0.0
+        sat_staked = 0.0
+
         for _, row in df.iterrows():
             row_dict = row.to_dict()
             res, pnl = self.settle_single_bet(row_dict, scores)
@@ -428,14 +503,36 @@ class SettlementEngine:
                 row_dict["status"] = "SETTLED"
                 row_dict["result"] = res
                 row_dict["pnl"] = pnl
+                stake = float(row_dict.get("stake_amount", 0.0))
                 total_pnl += pnl
-                total_staked += float(row_dict.get("stake_amount", 0.0))
+                total_staked += stake
+
                 if res == "WON":
                     won_count += 1
                 elif res == "LOST":
                     lost_count += 1
                 elif res == "PUSH":
                     push_count += 1
+
+                is_sat = self.is_satellite_bet(row_dict)
+                if is_sat:
+                    sat_staked += stake
+                    sat_pnl += pnl
+                    if res == "WON":
+                        sat_won += 1
+                    elif res == "LOST":
+                        sat_lost += 1
+                    elif res == "PUSH":
+                        sat_push += 1
+                else:
+                    core_staked += stake
+                    core_pnl += pnl
+                    if res == "WON":
+                        core_won += 1
+                    elif res == "LOST":
+                        core_lost += 1
+                    elif res == "PUSH":
+                        core_push += 1
 
             settled_rows.append(row_dict)
 
@@ -471,13 +568,20 @@ class SettlementEngine:
             f.write(
                 f"Settled at: {datetime.now(config.TZ_INFO).isoformat()}\n"
                 f"Total Bets: {len(settled_rows)}\n"
-                f"Won: {won_count}, Lost: {lost_count}, Push: {push_count}\n"
+                f"Core: Won: {core_won}, Lost: {core_lost}, Push: {core_push}, PnL: ${core_pnl:.2f}\n"
+                f"Satellite: Won: {sat_won}, Lost: {sat_lost}, Push: {sat_push}, PnL: ${sat_pnl:.2f}\n"
+                f"Global: Won: {won_count}, Lost: {lost_count}, Push: {push_count}\n"
                 f"Total Staked: ${total_staked:.2f}\n"
                 f"Total PnL: ${total_pnl:.2f}\n"
             )
         logger.info("Generated settlement sentinel: %s", sentinel.name)
 
         roi = (total_pnl / total_staked * 100.0) if total_staked > 0 else 0.0
+        core_roi = (core_pnl / core_staked * 100.0) if core_staked > 0 else 0.0
+        core_wr = (core_won / (core_won + core_lost) * 100.0) if (core_won + core_lost) > 0 else 0.0
+        sat_roi = (sat_pnl / sat_staked * 100.0) if sat_staked > 0 else 0.0
+        sat_wr = (sat_won / (sat_won + sat_lost) * 100.0) if (sat_won + sat_lost) > 0 else 0.0
+
         summary = {
             "status": "SUCCESS",
             "date": date_str,
@@ -488,6 +592,24 @@ class SettlementEngine:
             "total_staked": round(total_staked, 2),
             "total_pnl": round(total_pnl, 2),
             "roi_percent": round(roi, 2),
+            "core": {
+                "won": core_won,
+                "lost": core_lost,
+                "push": core_push,
+                "total_staked": round(core_staked, 2),
+                "total_pnl": round(core_pnl, 2),
+                "roi_percent": round(core_roi, 2),
+                "winrate": round(core_wr, 1),
+            },
+            "satellite": {
+                "won": sat_won,
+                "lost": sat_lost,
+                "push": sat_push,
+                "total_staked": round(sat_staked, 2),
+                "total_pnl": round(sat_pnl, 2),
+                "roi_percent": round(sat_roi, 2),
+                "winrate": round(sat_wr, 1),
+            },
         }
 
         # Compute historical stats across master records
