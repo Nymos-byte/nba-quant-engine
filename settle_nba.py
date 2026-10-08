@@ -118,12 +118,26 @@ class SettlementEngine:
                 info_h = {"pts": h_pts, "opponent_pts": a_pts, "team_name": h_name, "event_id": event_id}
                 info_a = {"pts": a_pts, "opponent_pts": h_pts, "team_name": a_name, "event_id": event_id}
 
+                abbr_alias_map = {
+                    "GS": "GSW", "GSW": "GS",
+                    "NO": "NOP", "NOP": "NO",
+                    "NY": "NYK", "NYK": "NY",
+                    "SA": "SAS", "SAS": "SA",
+                    "UTAH": "UTA", "UTA": "UTAH",
+                    "WSH": "WAS", "WAS": "WSH",
+                }
+
                 if h_abbr:
                     scores[h_abbr] = info_h
+                    if h_abbr in abbr_alias_map:
+                        scores[abbr_alias_map[h_abbr]] = info_h
                 if h_name:
                     scores[h_name] = info_h
+
                 if a_abbr:
                     scores[a_abbr] = info_a
+                    if a_abbr in abbr_alias_map:
+                        scores[abbr_alias_map[a_abbr]] = info_a
                 if a_name:
                     scores[a_name] = info_a
 
@@ -291,13 +305,16 @@ class SettlementEngine:
         # 4. Satellite Parlay
         elif market == "player_props_parlay":
             details = str(row.get("details", ""))
-            # Check if all teams involved in parlay have completed games
-            # Extract team codes like (DAL), (BOS), (DEN), (OKC)
-            teams_in_parlay = re.findall(r"\(([A-Z]{2,3})\)", details)
-            if not teams_in_parlay:
-                # If no teams found, cannot settle
+            # Extract legs directly from details
+            legs = re.findall(
+                r"([A-Za-z\s\.\'\-]+?)\s*\(([A-Z]+)\)\s*(?:vs\s*[A-Z]+\s*➔\s*)?(Over|Under)\s*([\d\.]+)\s*([A-Za-z0-9]+)",
+                details,
+            )
+            if not legs:
                 return "PENDING", 0.0
 
+            # Only check teams of the actual players in the legs
+            teams_in_parlay = [leg[1] for leg in legs]
             all_teams_finished = all(t in scores for t in teams_in_parlay)
             if not all_teams_finished:
                 # One or more games in the parlay haven't finished yet
@@ -305,10 +322,6 @@ class SettlementEngine:
 
             # When all games are finished, evaluate individual player props if available
             p_stats_map = scores.get("__player_stats__", {})
-            legs = re.findall(
-                r"([A-Za-z\s\.\'\-]+?)\s*\(([A-Z]+)\)\s*(?:vs\s*[A-Z]+\s*➔\s*)?(Over|Under)\s*([\d\.]+)\s*([A-Za-z0-9]+)",
-                details,
-            )
 
             if legs and p_stats_map:
                 all_legs_won = True
@@ -376,9 +389,19 @@ class SettlementEngine:
             return {"status": "NOT_FOUND", "message": msg}
 
         if sentinel.exists() and not force:
-            msg = f"Date {date_str} is already settled (sentinel exists: {sentinel.name}). Pass --force to override."
-            logger.info(msg)
-            return {"status": "ALREADY_SETTLED", "message": msg}
+            # Check if there are still unresolved bets in picks_file
+            try:
+                df_check = pd.read_csv(picks_file)
+                has_pending = not df_check.empty and (df_check.get("status", "") == "PENDING").any()
+            except Exception:
+                has_pending = False
+
+            if not has_pending:
+                msg = f"Date {date_str} is already settled (sentinel exists: {sentinel.name}). Pass --force to override."
+                logger.info(msg)
+                return {"status": "ALREADY_SETTLED", "message": msg}
+            else:
+                logger.info("Sentinel %s exists but bets are still PENDING in %s. Re-evaluating settlement...", sentinel.name, picks_file.name)
 
         logger.info("Settling wagers for date: %s", date_str)
         scores = self.fetch_box_scores(date_str)
@@ -485,24 +508,40 @@ class SettlementEngine:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NBA Quant Trading Settlement Engine")
-    parser.add_argument("--date", type=str, default=None, help="Target date YYYY-MM-DD (defaults to latest picks)")
+    parser.add_argument("--date", type=str, default=None, help="Target date YYYY-MM-DD")
     parser.add_argument("--force", action="store_true", help="Force re-settlement even if sentinel exists")
     args = parser.parse_args()
 
-    date_str = args.date
     engine = SettlementEngine()
 
-    if not date_str:
-        # Por defecto liquidar la jornada de AYER (partidos concluidos)
-        from datetime import timedelta
-        yesterday_str = (datetime.now(config.TZ_INFO) - timedelta(days=1)).strftime("%Y-%m-%d")
-        picks_file = engine.get_picks_file(yesterday_str)
-        if not picks_file.exists():
-            logger.info("No hay archivo de apuestas de ayer (%s) para liquidar.", yesterday_str)
-            return
-        date_str = yesterday_str
+    if args.date:
+        engine.settle_date(args.date, force=args.force)
+        return
 
-    engine.settle_date(date_str, force=args.force)
+    from datetime import timedelta
+    today_str = datetime.now(config.TZ_INFO).strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now(config.TZ_INFO) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    settled_any = False
+    for pf in sorted(config.HISTORY_DIR.glob("picks_*.csv")):
+        d = pf.stem.replace("picks_", "")
+        if d < today_str:
+            try:
+                df_check = pd.read_csv(pf)
+                has_pending = not df_check.empty and (df_check.get("status", "") == "PENDING").any()
+                if has_pending or args.force:
+                    logger.info("Auto-settling pending date: %s", d)
+                    engine.settle_date(d, force=True)
+                    settled_any = True
+            except Exception as e:
+                logger.debug("Error checking picks file %s: %s", pf.name, e)
+
+    if not settled_any:
+        picks_file = engine.get_picks_file(yesterday_str)
+        if picks_file.exists():
+            engine.settle_date(yesterday_str, force=args.force)
+        else:
+            logger.info("No hay apuestas pendientes ni archivo de ayer (%s) para liquidar.", yesterday_str)
 
 
 if __name__ == "__main__":
