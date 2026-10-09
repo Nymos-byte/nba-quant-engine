@@ -1,0 +1,2 @@
+date,game_id,matchup,bet_type,market,selection,odds,model_prob,market_fair_prob,final_prob,edge,ev_percent,stake_fraction,stake_amount,status,result,pnl,details
+2026-10-09,2dfe1ab3d2444aacc46386025b8149a8,Memphis Grizzlies @ Chicago Bulls,CORE_STRAIGHT,moneyline,Memphis Grizzlies ML,2.2,0.6566,0.4359,0.5131,0.0586,12.89,0.0175,17.5,PENDING,PENDING,0.0,Quarter-Kelly=0.0269; RawKelly=0.1074
