@@ -217,3 +217,22 @@ def test_send_settlement_report_output(monkeypatch):
     assert "Core Quant Acumulado" in msg
     assert "Soñadora Acumulado" in msg
 
+
+def test_run_pipeline_sentinel_skips_duplicate_run(tmp_path, monkeypatch):
+    import config
+    import main
+
+    target_date = "2026-10-12"
+    sentinel = tmp_path / f"notification_{target_date}.done"
+    sentinel.write_text("Notified at: test\n", encoding="utf-8")
+
+    monkeypatch.setattr(config, "HISTORY_DIR", tmp_path)
+
+    called_ingestion = []
+    monkeypatch.setattr(main, "NBADataCollector", lambda: called_ingestion.append(True))
+
+    # Without force, it should skip execution and not call NBADataCollector
+    main.run_pipeline(date_str=target_date, force=False)
+    assert len(called_ingestion) == 0
+
+

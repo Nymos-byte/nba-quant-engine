@@ -156,23 +156,36 @@ def persist_picks_to_csv(
     # Master file (strictly separated to prevent preseason data contamination)
     master_name = "preseason_apuestas.csv" if is_preseason else "todas_las_apuestas.csv"
     prod_master = output_dir / master_name
-    file_exists = prod_master.exists()
-    with open(prod_master, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
-        for r in rows:
-            writer.writerow(r)
-    logger.info("Updated master record (%s): %s", "PRESEASON" if is_preseason else "REGULAR SEASON", prod_master.name)
+    if prod_master.exists():
+        try:
+            mdf = pd.read_csv(prod_master)
+            mdf = mdf[mdf["date"] != date_str]
+            updated_mdf = pd.concat([mdf, pd.DataFrame(rows)], ignore_index=True)
+            updated_mdf.to_csv(prod_master, index=False)
+            logger.info("Updated master record (%s): %s", "PRESEASON" if is_preseason else "REGULAR SEASON", prod_master.name)
+        except Exception as e:
+            logger.debug("Failed updating master record %s: %s", prod_master.name, e)
+            pd.DataFrame(rows).to_csv(prod_master, index=False)
+    else:
+        pd.DataFrame(rows).to_csv(prod_master, index=False)
+        logger.info("Created master record (%s): %s", "PRESEASON" if is_preseason else "REGULAR SEASON", prod_master.name)
 
     logger.info("Persisted %d approved picks to %s", len(rows), out_file.name)
     return out_file
 
 
-def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) -> None:
+def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False, force: bool = False) -> None:
     """Executes full quantitative trading routine."""
     target_date = date_str or get_current_date_str()
     logger.info("Initiating NBA Quant Engine pipeline for target date: %s", target_date)
+
+    sentinel = config.HISTORY_DIR / f"notification_{target_date}.done"
+    if sentinel.exists() and not force:
+        logger.info(
+            "Notification for %s already dispatched (%s). Skipping duplicate Telegram notification. (Pass --force to override)",
+            target_date, sentinel.name
+        )
+        return
 
     # 1. Ingestion
     nba_collector = NBADataCollector()
@@ -441,14 +454,27 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False) ->
         final_core_picks, best_parlay, spent_this_week_mxn=spent_week, is_preseason=is_preseason
     )
 
+    # Sentinel to avoid duplicate Telegram notifications on the same date
+    try:
+        with open(sentinel, "w", encoding="utf-8") as f:
+            f.write(
+                f"Notified at: {datetime.now(config.TZ_INFO).isoformat()}\n"
+                f"Core picks: {len(final_core_picks)}\n"
+                f"Parlay: {best_parlay.ticket_id if best_parlay else 'None'}\n"
+            )
+        logger.info("Generated notification sentinel: %s", sentinel.name)
+    except Exception as e:
+        logger.debug("Failed creating sentinel %s: %s", sentinel.name, e)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NBA Quantitative Engine Daily Orchestrator")
     parser.add_argument("--date", type=typestr_date, default=None, help="Target date in YYYY-MM-DD format")
     parser.add_argument("--refresh", action="store_true", help="Force fresh data from APIs, ignoring cache")
+    parser.add_argument("--force", action="store_true", help="Force execution and notification even if already sent today")
     args = parser.parse_args()
 
-    run_pipeline(date_str=args.date, force_refresh=args.refresh)
+    run_pipeline(date_str=args.date, force_refresh=args.refresh, force=args.force)
 
 
 def typestr_date(val: str) -> str:

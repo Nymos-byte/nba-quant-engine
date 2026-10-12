@@ -4,9 +4,10 @@ on:
   workflow_dispatch: # Permite ejecución manual desde la pestaña Actions en GitHub y vía API de cron-job.org
   repository_dispatch: # Permite webhook POST de cron-job.org
     types: [run-pipeline]
-  schedule:
-    # Ejecución automática: 17:00 UTC (11:00 AM CDMX)
-    - cron: '0 17 * * *'
+  # Nota: El cron nativo de GitHub se desactiva porque sufre retrasos de 3 a 4 horas en horas pico (17:00 UTC).
+  # La ejecución puntual a las 11:00 AM CDMX la realiza cron-job.org vía webhook (repository_dispatch / workflow_dispatch).
+  # schedule:
+  #   - cron: '0 17 * * *'
 
 permissions:
   contents: write
