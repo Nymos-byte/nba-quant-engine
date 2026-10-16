@@ -1,2 +1,2 @@
 date,game_id,matchup,bet_type,market,selection,odds,model_prob,market_fair_prob,final_prob,edge,ev_percent,stake_fraction,stake_amount,status,result,pnl,details
-2026-10-15,9894fba726e0a948a1153e31b01c452e,Toronto Raptors @ New York Knicks,CORE_STRAIGHT,spread,New York Knicks -5.5,1.91,0.7208,0.5,0.5773,0.0537,10.26,0.0175,17.5,PENDING,PENDING,0.0,Quarter-Kelly=0.0282; RawKelly=0.1128
+2026-10-15,9894fba726e0a948a1153e31b01c452e,Toronto Raptors @ New York Knicks,CORE_STRAIGHT,spread,New York Knicks -5.5,1.91,0.7208,0.5,0.5773,0.0537,10.26,0.0175,17.5,SETTLED,LOST,-17.5,Quarter-Kelly=0.0282; RawKelly=0.1128
