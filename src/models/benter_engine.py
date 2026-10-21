@@ -49,7 +49,7 @@ class BenterEngine:
         max_kelly_stake: float = config.MAX_KELLY_STAKE,
         min_edge: float = config.MIN_EDGE,
         min_ev_percent: float = config.MIN_EV_PERCENT,
-        bankroll: float = config.BANKROLL_CORE,
+        bankroll: Optional[float] = None,
     ) -> None:
         if not abs((weight_model + weight_market) - 1.0) < 1e-5:
             raise ValueError(f"Ensemble weights must sum to 1.0, got: {weight_model + weight_market}")
@@ -60,7 +60,7 @@ class BenterEngine:
         self.max_kelly_stake = max_kelly_stake
         self.min_edge = min_edge
         self.min_ev_percent = min_ev_percent
-        self.bankroll = bankroll
+        self.bankroll = bankroll if bankroll is not None else config.get_current_bankroll()
 
     def combine_probabilities(self, p_model: float, p_market_fair: float) -> float:
         """

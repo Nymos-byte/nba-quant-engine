@@ -53,7 +53,7 @@ def deduplicate_picks_by_game(
 def rescale_daily_exposure(
     picks: List[BetEvaluation],
     max_daily_exposure: float = config.MAX_DAILY_EXPOSURE,
-    bankroll: float = config.BANKROLL_CORE,
+    bankroll: Optional[float] = None,
     min_bet_amount: float = config.MIN_BET_AMOUNT_MXN,
 ) -> List[BetEvaluation]:
     """
@@ -64,6 +64,8 @@ def rescale_daily_exposure(
     """
     if not picks:
         return []
+
+    active_bankroll = bankroll if bankroll is not None else config.get_current_bankroll()
 
     total_stake = sum(p.recommended_stake_fraction for p in picks)
     scaling_factor = 1.0
@@ -78,12 +80,12 @@ def rescale_daily_exposure(
     rescaled_picks: List[BetEvaluation] = []
     for p in picks:
         new_fraction = round(p.recommended_stake_fraction * scaling_factor, 6)
-        raw_amount = round(new_fraction * bankroll, 2)
+        raw_amount = round(new_fraction * active_bankroll, 2)
 
         # Enforce Draftea / Mexican book minimum bet ($5.00 MXN) if bankroll permits
-        if raw_amount < min_bet_amount and bankroll >= min_bet_amount:
+        if raw_amount < min_bet_amount and active_bankroll >= min_bet_amount:
             new_amount = float(min_bet_amount)
-            new_fraction = round(new_amount / bankroll, 6)
+            new_fraction = round(new_amount / active_bankroll, 6)
         else:
             new_amount = raw_amount
 

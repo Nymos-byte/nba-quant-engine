@@ -4,10 +4,12 @@ Centralized Configuration and Institutional Risk Parameters for nba-quant-engine
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -16,6 +18,7 @@ BASE_DIR: Path = Path(__file__).resolve().parent
 DATA_DIR: Path = BASE_DIR / "data"
 CACHE_DIR: Path = DATA_DIR / "cache"
 HISTORY_DIR: Path = DATA_DIR / "history"
+BANKROLL_STATE_FILE: Path = DATA_DIR / "bankroll_state.json"
 
 # Ensure runtime directories exist
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,6 +44,49 @@ BASELINE_SEASON: str = "2025-26"
 # CORE QUANTITATIVE PARAMETERS (INSTITUTIONAL)
 # ==========================================
 BANKROLL_CORE: float = float(os.getenv("BANKROLL_CORE", "1000.0"))  # Pesos Mexicanos (MXN)
+
+
+def get_current_bankroll(state_file: Optional[Path] = None) -> float:
+    """
+    Retrieves current active bankroll from JSON state file.
+    If the file does not exist, initializes it automatically with BANKROLL_CORE.
+    """
+    file_path = state_file or BANKROLL_STATE_FILE
+    if file_path.exists():
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                val = float(data.get("current_bankroll", BANKROLL_CORE))
+                if val > 0:
+                    return val
+        except Exception:
+            pass
+
+    # Initialize file if missing or invalid
+    init_val = BANKROLL_CORE
+    set_current_bankroll(init_val, state_file=file_path)
+    return init_val
+
+
+def set_current_bankroll(amount: float, state_file: Optional[Path] = None) -> float:
+    """
+    Updates the bankroll state file with a validated positive amount and timestamp in CDMX timezone.
+    """
+    if amount <= 0:
+        raise ValueError(f"El bankroll debe ser un número positivo (> 0), recibido: {amount}")
+
+    file_path = state_file or BANKROLL_STATE_FILE
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    now_str = datetime.now(TZ_INFO).strftime("%Y-%m-%d %H:%M:%S")
+    state = {
+        "current_bankroll": round(float(amount), 2),
+        "last_updated": now_str,
+    }
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+    return state["current_bankroll"]
+
 KELLY_FRACTION: float = 0.25  # Quarter-Kelly
 MAX_KELLY_STAKE: float = 0.0175  # 1.75% hard ceiling per bet
 MIN_KELLY_STAKE: float = 0.0100  # 1.00% hard floor per bet (below this, stake is 0.0)

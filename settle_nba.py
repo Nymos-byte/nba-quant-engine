@@ -32,8 +32,13 @@ if not logger.handlers:
 class SettlementEngine:
     """Settles daily bets and records financial PnL."""
 
-    def __init__(self, history_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        history_dir: Optional[Path] = None,
+        bankroll_state_file: Optional[Path] = None,
+    ) -> None:
         self.history_dir: Path = history_dir or config.HISTORY_DIR
+        self.bankroll_state_file: Optional[Path] = bankroll_state_file
         self.espn: ESPNDataCollector = ESPNDataCollector()
 
     def get_sentinel_path(self, date_str: str) -> Path:
@@ -555,7 +560,7 @@ class SettlementEngine:
         target_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
         is_preseason = target_dt < config.REGULAR_SEASON_START_DATE
         master_name = "preseason_apuestas.csv" if is_preseason else "todas_las_apuestas.csv"
-        master_file = config.HISTORY_DIR / master_name
+        master_file = self.history_dir / master_name
 
         if master_file.exists():
             try:
@@ -586,6 +591,18 @@ class SettlementEngine:
                 f"Total PnL: ${total_pnl:.2f}\n"
             )
         logger.info("Generated settlement sentinel: %s", sentinel.name)
+
+        # Sincronización de Bankroll State: sumar el PnL neto de las posiciones recién liquidadas
+        try:
+            current_bankroll = config.get_current_bankroll(state_file=self.bankroll_state_file)
+            updated_bankroll = max(0.0, round(current_bankroll + total_pnl, 2))
+            config.set_current_bankroll(updated_bankroll, state_file=self.bankroll_state_file)
+            logger.info(
+                "[BANKROLL SYNC] Saldo actualizado post-liquidación: $%0.2f MXN (PnL neto del día: %+0.2f MXN)",
+                updated_bankroll, total_pnl
+            )
+        except Exception as e:
+            logger.warning("No se pudo actualizar el estado de bankroll post-liquidación: %s", e)
 
         roi = (total_pnl / total_staked * 100.0) if total_staked > 0 else 0.0
         core_roi = (core_pnl / core_staked * 100.0) if core_staked > 0 else 0.0

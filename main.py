@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -176,7 +177,12 @@ def persist_picks_to_csv(
     return out_file
 
 
-def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False, force: bool = False) -> None:
+def run_pipeline(
+    date_str: Optional[str] = None,
+    force_refresh: bool = False,
+    force: bool = False,
+    bankroll: Optional[float] = None,
+) -> None:
     """Executes full quantitative trading routine."""
     target_date = date_str or get_current_date_str()
     logger.info("Initiating NBA Quant Engine pipeline for target date: %s", target_date)
@@ -188,6 +194,9 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False, fo
             target_date, sentinel.name
         )
         return
+
+    active_bankroll = bankroll if bankroll is not None else config.get_current_bankroll()
+    logger.info("Operating with active bankroll: $%.2f MXN", active_bankroll)
 
     # 1. Ingestion
     nba_collector = NBADataCollector()
@@ -204,7 +213,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False, fo
 
     # 2. Rating & Benter Engines
     rating_engine = RatingEngine()
-    benter_engine = BenterEngine()
+    benter_engine = BenterEngine(bankroll=active_bankroll)
     props_model = PlayerPropsModel(league_average_pace=league_averages["pace"])
     parlay_builder = ParlayBuilder()
 
@@ -444,7 +453,7 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False, fo
     logger.info("Bets after strict single-game deduplication: %d", len(deduped_bets))
 
     # 2. Daily Exposure Normalization: capped at MAX_DAILY_EXPOSURE (10.0%)
-    final_core_picks = rescale_daily_exposure(deduped_bets)
+    final_core_picks = rescale_daily_exposure(deduped_bets, bankroll=active_bankroll)
     logger.info("Final approved Core institutional picks: %d", len(final_core_picks))
 
     # ==========================================
@@ -493,7 +502,24 @@ def main() -> None:
     parser.add_argument("--date", type=typestr_date, default=None, help="Target date in YYYY-MM-DD format")
     parser.add_argument("--refresh", action="store_true", help="Force fresh data from APIs, ignoring cache")
     parser.add_argument("--force", action="store_true", help="Force execution and notification even if already sent today")
+    parser.add_argument("--set-bankroll", type=float, default=None, help="Set current bankroll in MXN and update state file")
     args = parser.parse_args()
+
+    if args.set_bankroll is not None:
+        if args.set_bankroll <= 0:
+            print("Error: El monto de bankroll debe ser un número positivo (> 0).", file=sys.stderr)
+            sys.exit(1)
+
+        new_bankroll = config.set_current_bankroll(args.set_bankroll)
+        ceiling_amount = round(config.MAX_KELLY_STAKE * new_bankroll, 2)
+        floor_amount = round(config.MIN_KELLY_STAKE * new_bankroll, 2)
+
+        print(f"[BANKROLL ACTUALIZADO] Saldo base configurado en: ${new_bankroll:.2f} MXN")
+        print(f"-> Nuevo techo de Kelly ({config.MAX_KELLY_STAKE * 100:.2f}%): ${ceiling_amount:.2f} MXN")
+        print(f"-> Nuevo piso operativo ({config.MIN_KELLY_STAKE * 100:.2f}%): ${floor_amount:.2f} MXN")
+
+        if not args.force and args.date is None:
+            return
 
     run_pipeline(date_str=args.date, force_refresh=args.refresh, force=args.force)
 
