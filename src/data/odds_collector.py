@@ -208,12 +208,13 @@ class OddsCollector:
 
     def _generate_synthetic_game_odds(self) -> List[Dict[str, Any]]:
         """Deterministic baseline slate for offline runs and testing."""
+        today_str = datetime.now(config.TZ_INFO).strftime("%Y-%m-%d")
         games = [
             {
-                "game_id": "nba_2026_dal_bos",
+                "game_id": f"nba_{today_str}_dal_bos",
                 "home_team": "Boston Celtics",
                 "away_team": "Dallas Mavericks",
-                "commence_time": "2026-10-07T23:30:00Z",
+                "commence_time": f"{today_str}T23:30:00Z",
                 "markets": {
                     "h2h": {
                         "Boston Celtics": {"odds": 1.55, "market_fair_prob": 0.621},
@@ -230,10 +231,10 @@ class OddsCollector:
                 },
             },
             {
-                "game_id": "nba_2026_den_okc",
+                "game_id": f"nba_{today_str}_den_okc",
                 "home_team": "Oklahoma City Thunder",
                 "away_team": "Denver Nuggets",
-                "commence_time": "2026-10-08T00:00:00Z",
+                "commence_time": f"{today_str}T23:59:00Z",
                 "markets": {
                     "h2h": {
                         "Oklahoma City Thunder": {"odds": 1.70, "market_fair_prob": 0.565},
@@ -250,10 +251,10 @@ class OddsCollector:
                 },
             },
             {
-                "game_id": "nba_2026_gsw_lal",
+                "game_id": f"nba_{today_str}_gsw_lal",
                 "home_team": "Los Angeles Lakers",
                 "away_team": "Golden State Warriors",
-                "commence_time": "2026-10-08T02:30:00Z",
+                "commence_time": f"{today_str}T23:45:00Z",
                 "markets": {
                     "h2h": {
                         "Los Angeles Lakers": {"odds": 1.85, "market_fair_prob": 0.521},

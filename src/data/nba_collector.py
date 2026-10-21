@@ -278,7 +278,17 @@ class NBADataCollector:
         }
 
     def _generate_fallback_players(self) -> pd.DataFrame:
-        """Realistic sample player roster with key starters and props benchmarks."""
+        """Realistic sample player roster with key starters and props benchmarks across all 30 teams."""
+        cache_path = self.cache_dir / "player_stats_2025_26.json"
+        if cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list) and len(data) > 0:
+                        return pd.DataFrame(data)
+            except Exception as e:
+                logger.warning("Error reading %s for fallback: %s", cache_path.name, e)
+
         sample = [
             {"player_id": 1629029, "player_name": "Luka Doncic", "team_id": 1610612742, "team_abbreviation": "DAL", "min": 36.8, "usg_pct": 0.355, "pts": 32.4, "reb": 8.6, "ast": 9.4, "fg3m": 3.8},
             {"player_id": 202681, "player_name": "Kyrie Irving", "team_id": 1610612742, "team_abbreviation": "DAL", "min": 34.5, "usg_pct": 0.278, "pts": 25.1, "reb": 4.9, "ast": 5.2, "fg3m": 2.9},

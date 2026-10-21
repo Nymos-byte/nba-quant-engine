@@ -1,3 +1,0 @@
-date,game_id,matchup,bet_type,market,selection,odds,model_prob,market_fair_prob,final_prob,edge,ev_percent,stake_fraction,stake_amount,status,result,pnl,details
-2026-10-11,0036e615f08dd4d7d5d0e5f01edab115,Milwaukee Bucks @ Charlotte Hornets,CORE_STRAIGHT,moneyline,Milwaukee Bucks ML,2.3,0.7259,0.4177,0.5256,0.0908,20.88,0.0175,17.5,SETTLED,LOST,-17.5,Quarter-Kelly=0.0402; RawKelly=0.1606
-2026-10-11,d2d7ad451625a9e3520edf55063eeac0,Orlando Magic @ Cleveland Cavaliers,CORE_STRAIGHT,total,Under 228.5,1.89,0.7413,0.5052,0.5879,0.0588,11.11,0.0175,17.5,SETTLED,WON,15.57,Quarter-Kelly=0.0312; RawKelly=0.1248

@@ -32,7 +32,7 @@ TZ_INFO: ZoneInfo = ZoneInfo(TIMEZONE)
 # CONTROL DE TEMPORADA Y PRETEMPORADA
 # ==========================================
 REGULAR_SEASON_START_DATE: date = date(2026, 10, 20)
-IS_PRESEASON_MODE: bool = date.today() < REGULAR_SEASON_START_DATE
+IS_PRESEASON_MODE: bool = False  # Temporada regular activa (pretemporada finalizada)
 
 # Temporada base para extracción histórica obligatoria
 BASELINE_SEASON: str = "2025-26"

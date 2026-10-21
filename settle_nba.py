@@ -194,8 +194,17 @@ class SettlementEngine:
                     scores[h_abbr] = info_h
                     if h_abbr in abbr_alias_map:
                         scores[abbr_alias_map[h_abbr]] = info_h
+                name_alias_map = {
+                    "LA Clippers": "Los Angeles Clippers",
+                    "Los Angeles Clippers": "LA Clippers",
+                    "LA Lakers": "Los Angeles Lakers",
+                    "Los Angeles Lakers": "LA Lakers",
+                }
+
                 if h_name:
                     scores[h_name] = info_h
+                    if h_name in name_alias_map:
+                        scores[name_alias_map[h_name]] = info_h
 
                 if a_abbr:
                     scores[a_abbr] = info_a
@@ -203,6 +212,8 @@ class SettlementEngine:
                         scores[abbr_alias_map[a_abbr]] = info_a
                 if a_name:
                     scores[a_name] = info_a
+                    if a_name in name_alias_map:
+                        scores[name_alias_map[a_name]] = info_a
 
             if scores:
                 scores["__event_ids__"] = event_ids

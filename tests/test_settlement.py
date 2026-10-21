@@ -236,3 +236,73 @@ def test_run_pipeline_sentinel_skips_duplicate_run(tmp_path, monkeypatch):
     assert len(called_ingestion) == 0
 
 
+def test_run_pipeline_strict_date_filter(tmp_path, monkeypatch):
+    import config
+    import main
+    import pandas as pd
+
+    monkeypatch.setattr(config, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path)
+
+    # Mock NBADataCollector so it doesn't call stats.nba.com
+    class FakeNBACollector:
+        def get_team_stats(self, **kwargs):
+            return pd.DataFrame([
+                {"team_id": 1, "team_name": "Boston Celtics", "team_abbreviation": "BOS", "pace": 100.0, "ortg": 125.0, "drtg": 102.0, "pts": 120.0, "gp": 82},
+                {"team_id": 2, "team_name": "Dallas Mavericks", "team_abbreviation": "DAL", "pace": 100.0, "ortg": 105.0, "drtg": 118.0, "pts": 102.0, "gp": 82},
+                {"team_id": 3, "team_name": "Los Angeles Lakers", "team_abbreviation": "LAL", "pace": 100.0, "ortg": 125.0, "drtg": 102.0, "pts": 120.0, "gp": 82},
+                {"team_id": 4, "team_name": "Golden State Warriors", "team_abbreviation": "GSW", "pace": 100.0, "ortg": 105.0, "drtg": 118.0, "pts": 102.0, "gp": 82},
+            ])
+
+        def get_player_stats(self, **kwargs):
+            return pd.DataFrame()
+
+        def get_league_averages(self, df):
+            return {"pace": 100.0, "ortg": 114.0, "drtg": 114.0, "pts": 112.0}
+
+    monkeypatch.setattr(main, "NBADataCollector", FakeNBACollector)
+
+    # Mock OddsCollector with huge +EV on Boston (odds 3.50 when model expects Boston to win easily)
+    fake_games = [
+        {
+            "game_id": "today_game",
+            "home_team": "Boston Celtics",
+            "away_team": "Dallas Mavericks",
+            "commence_time": "2026-10-21T23:00:00Z",
+            "markets": {
+                "h2h": {"Boston Celtics": {"odds": 3.50, "market_fair_prob": 0.28}, "Dallas Mavericks": {"odds": 1.35, "market_fair_prob": 0.72}},
+            },
+        },
+        {
+            "game_id": "tomorrow_game",
+            "home_team": "Los Angeles Lakers",
+            "away_team": "Golden State Warriors",
+            "commence_time": "2026-10-22T23:00:00Z",
+            "markets": {
+                "h2h": {"Los Angeles Lakers": {"odds": 3.50, "market_fair_prob": 0.28}, "Golden State Warriors": {"odds": 1.35, "market_fair_prob": 0.72}},
+            },
+        },
+    ]
+
+    class FakeOddsCollector:
+        def get_game_odds(self, **kwargs):
+            return fake_games
+
+    monkeypatch.setattr(main, "OddsCollector", FakeOddsCollector)
+
+    # Mock notifier so no Telegram message is sent
+    monkeypatch.setattr(main.TelegramNotifier, "send_notification", lambda self, *args, **kwargs: True)
+
+    main.run_pipeline(date_str="2026-10-21", force=True)
+
+    # Check generated picks CSV
+    picks_file = tmp_path / "picks_2026-10-21.csv"
+    assert picks_file.exists()
+    df = pd.read_csv(picks_file)
+    # Ensure tomorrow's game was NOT evaluated
+    game_ids = df["game_id"].unique()
+    assert "today_game" in game_ids
+    assert "tomorrow_game" not in game_ids
+
+
+

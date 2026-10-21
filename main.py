@@ -62,14 +62,16 @@ def persist_picks_to_csv(
     core_picks: List[BetEvaluation],
     parlay: Optional[ParlayTicket],
     date_str: str,
-    is_preseason: bool = config.IS_PRESEASON_MODE,
-    output_dir: Path = config.HISTORY_DIR,
+    is_preseason: bool = False,
+    output_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """
     Saves daily approved trades.
     If is_preseason is True: operates in SANDBOX mode and does NOT write to
     production 'todas_las_apuestas.csv'.
     """
+    if output_dir is None:
+        output_dir = config.HISTORY_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     # Active Paper Trading: always write to picks_{date_str}.csv
     out_file = output_dir / f"picks_{date_str}.csv"
@@ -214,6 +216,22 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False, fo
         game_id = game["game_id"]
         home_name = game["home_team"]
         away_name = game["away_team"]
+        commence_time = game.get("commence_time")
+
+        # Strict Slate Filter: Only evaluate games tipping off on target_date in local timezone (America/Mexico_City)
+        if commence_time:
+            try:
+                c_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+                game_local_date = c_dt.astimezone(config.TZ_INFO).strftime("%Y-%m-%d")
+                if game_local_date != target_date:
+                    logger.info(
+                        "Ignoring game %s @ %s (local tip-off %s != target date %s)",
+                        away_name, home_name, game_local_date, target_date
+                    )
+                    continue
+            except Exception as e:
+                logger.debug("Error parsing commence_time %s: %s", commence_time, e)
+
         markets = game.get("markets", {})
 
         home_stats = teams_by_name.get(home_name, {"pace": 100.0, "ortg": 114.0, "drtg": 114.0, "team_abbreviation": "HOME"})
@@ -320,7 +338,10 @@ def run_pipeline(date_str: Optional[str] = None, force_refresh: bool = False, fo
         away_abbr = away_stats.get("team_abbreviation")
         team_abbrs = [home_abbr, away_abbr]
 
-        relevant_players = player_df[player_df["team_abbreviation"].isin(team_abbrs)]
+        if player_df.empty or "team_abbreviation" not in player_df.columns:
+            relevant_players = pd.DataFrame()
+        else:
+            relevant_players = player_df[player_df["team_abbreviation"].isin(team_abbrs)]
         for _, pl in relevant_players.iterrows():
             pl_team_abbr = pl["team_abbreviation"]
             is_home = (pl_team_abbr == home_abbr)

@@ -1,3 +1,0 @@
-date,game_id,matchup,bet_type,market,selection,odds,model_prob,market_fair_prob,final_prob,edge,ev_percent,stake_fraction,stake_amount,status,result,pnl,details
-2026-10-12,67a4008e2cd93ca0a96f9aef4ecda8fc,Oklahoma City Thunder @ Atlanta Hawks,CORE_STRAIGHT,moneyline,Oklahoma City Thunder ML,3.0,0.7775,0.3197,0.4799,0.1466,43.98,0.0175,17.5,SETTLED,LOST,-17.5,Quarter-Kelly=0.0550; RawKelly=0.2199
-2026-10-12,6a3e301aa8e24ba57b28b18c885a7c64,Minnesota Timberwolves @ New York Knicks,CORE_STRAIGHT,total,Under 227.5,1.91,0.7574,0.5,0.5901,0.0665,12.71,0.0175,17.5,SETTLED,WON,15.92,Quarter-Kelly=0.0349; RawKelly=0.1396

@@ -1,5 +1,0 @@
-date,game_id,matchup,bet_type,market,selection,odds,model_prob,market_fair_prob,final_prob,edge,ev_percent,stake_fraction,stake_amount,status,result,pnl,details
-2026-10-13,ef5f3103312b16df2a5f97e7a7f21ac5,New York Knicks @ Toronto Raptors,CORE_STRAIGHT,moneyline,New York Knicks ML,4.1,0.7261,0.2336,0.406,0.1621,66.46,0.0175,17.5,SETTLED,LOST,-17.5,Quarter-Kelly=0.0536; RawKelly=0.2144
-2026-10-13,d21ccd65c0c6a13689aaddf56374de0b,Indiana Pacers @ Oklahoma City Thunder,CORE_STRAIGHT,total,Over 228.5,1.91,0.8204,0.5,0.6121,0.0886,16.92,0.0175,17.5,SETTLED,LOST,-17.5,Quarter-Kelly=0.0465; RawKelly=0.1859
-2026-10-13,f23d7eb3edb5927af26f540b18442d15,Portland Trail Blazers @ Sacramento Kings,CORE_STRAIGHT,spread,Sacramento Kings -1.5,1.95,0.7854,0.4895,0.5931,0.0803,15.65,0.0175,17.5,SETTLED,LOST,-17.5,Quarter-Kelly=0.0412; RawKelly=0.1648
-2026-10-13,860ec3ecb7ca4564408fbd4efa5cc2fd,Cleveland Cavaliers @ Orlando Magic,CORE_STRAIGHT,total,Under 228.5,1.91,0.7413,0.5,0.5845,0.0609,11.63,0.0175,17.5,SETTLED,LOST,-17.5,Quarter-Kelly=0.0320; RawKelly=0.1278
