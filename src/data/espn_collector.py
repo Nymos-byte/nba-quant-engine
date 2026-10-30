@@ -112,6 +112,26 @@ class ESPNDataCollector:
         logger.info("Retrieved %d games from ESPN scoreboard for %s", len(games), date_str)
         return games
 
+    def get_injuries(self) -> Dict[str, str]:
+        """
+        Retrieves the league injury report as {lowercase player name: status}, e.g. 'Out', 'Day-To-Day'.
+        Returns an empty report if the request fails.
+        """
+        url = f"{self.BASE_URL}/injuries"
+        try:
+            resp = requests.get(url, headers=self.DEFAULT_HEADERS, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.warning("Failed to fetch ESPN injury report: %s", e)
+            return {}
+
+        return {
+            str(entry.get("athlete", {}).get("displayName", "")).strip().lower(): str(entry.get("status", ""))
+            for team in data.get("injuries", [])
+            for entry in team.get("injuries", [])
+        }
+
     def get_game_boxscore(
         self,
         event_id: str,

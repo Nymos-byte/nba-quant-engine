@@ -19,6 +19,7 @@ import pandas as pd
 import config
 from src.data.nba_collector import NBADataCollector
 from src.data.odds_collector import OddsCollector
+from src.data.season_stats import normalize_name
 from src.models.rating_engine import RatingEngine
 from src.models.benter_engine import BenterEngine, BetEvaluation
 from src.models.risk_manager import deduplicate_picks_by_game, rescale_daily_exposure
@@ -35,6 +36,63 @@ def get_current_date_str() -> str:
     """Returns today's date formatted as YYYY-MM-DD in the official timezone."""
     now = datetime.now(config.TZ_INFO)
     return now.strftime("%Y-%m-%d")
+
+
+def evaluate_player_props(
+    players: pd.DataFrame,
+    props: Dict[str, Any],
+    game_id: str,
+    matchup: str,
+    team_paces: Dict[str, float],
+    expected_pace: float,
+    props_model: PlayerPropsModel,
+    benter_engine: BenterEngine,
+) -> List[BetEvaluation]:
+    """Evaluates both sides of each real player line against the player's distribution."""
+    bets: List[BetEvaluation] = []
+    for category, lines in props.items():
+        for pl in players.to_dict(orient="records"):
+            entry = lines.get(normalize_name(pl["player_name"]))
+            if not entry or pl["gp"] < config.MIN_PROP_GAMES or pl["min"] < config.MIN_PROP_MINUTES:
+                continue
+
+            team_pace = team_paces.get(pl["team_abbreviation"], expected_pace)
+            pace_adjusted = pl[category] * props_model.get_pace_factor(team_pace, expected_pace)
+            market_mean = props_model.market_implied_mean(category, entry["point"], entry["Over"]["market_fair_prob"])
+            baseline = props_model.shrink_to_market(pace_adjusted, market_mean, pl["gp"], config.PROP_LINE_PRIOR_GAMES)
+            dist = props_model.fit_distribution(
+                player_name=entry["name"],
+                team_abbreviation=pl["team_abbreviation"],
+                category=category,
+                baseline_stat=baseline,
+                team_pace=expected_pace,
+                expected_game_pace=expected_pace,
+            )
+            p_over = props_model.calculate_over_prob(dist, entry["point"])
+            for direction, p_model in (("Over", p_over), ("Under", 1.0 - p_over)):
+                bets.append(benter_engine.evaluate_bet(
+                    game_id=game_id,
+                    market="player_prop",
+                    selection=f"{entry['name']} {direction} {entry['point']:g} {category.upper()}",
+                    decimal_odds=entry[direction]["odds"],
+                    p_model=p_model,
+                    p_market_fair=entry[direction]["market_fair_prob"],
+                    matchup=matchup,
+                ))
+    return bets
+
+
+def _is_on_date(game: Dict[str, Any], target_date: str) -> bool:
+    """True if the game tips off on target_date in the official timezone."""
+    commence_time = game.get("commence_time")
+    if not commence_time:
+        return True
+    try:
+        c_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+        return c_dt.astimezone(config.TZ_INFO).strftime("%Y-%m-%d") == target_date
+    except Exception as e:
+        logger.debug("Error parsing commence_time %s: %s", commence_time, e)
+        return True
 
 
 def calculate_weekly_spent(history_dir: Path, target_date_str: str) -> float:
@@ -85,6 +143,7 @@ def persist_picks_to_csv(
         "market",
         "selection",
         "odds",
+        "min_odds",
         "model_prob",
         "market_fair_prob",
         "final_prob",
@@ -110,6 +169,7 @@ def persist_picks_to_csv(
             "market": p.market,
             "selection": p.selection,
             "odds": p.odds,
+            "min_odds": p.min_odds,
             "model_prob": p.model_prob,
             "market_fair_prob": p.market_fair_prob,
             "final_prob": p.final_prob,
@@ -137,6 +197,7 @@ def persist_picks_to_csv(
             "market": "player_props_parlay",
             "selection": parlay.ticket_id,
             "odds": parlay.combined_odds,
+            "min_odds": "",
             "model_prob": 0.0,
             "market_fair_prob": 0.0,
             "final_prob": 0.0,
@@ -207,9 +268,26 @@ def run_pipeline(
     league_averages = nba_collector.get_league_averages(team_df)
     games_odds = odds_collector.get_game_odds(force_refresh=force_refresh)
 
+    # Sin mercado real o sin datos de la temporada no se apuesta, y sin centinela para poder reintentar
+    if not games_odds:
+        logger.error("Sin cuotas para %s: no se generan picks.", target_date)
+        return
+    if "season_gp" in team_df.columns and team_df["season_gp"].sum() == 0:
+        logger.error("Sin partidos de la temporada en curso: no se generan picks.")
+        return
+
     # Pre-index teams by name for fast lookup
     teams_by_name = {t["team_name"]: t for t in team_df.to_dict(orient="records")}
     teams_by_abbrev = {t["team_abbreviation"]: t for t in team_df.to_dict(orient="records")}
+
+    # Sin jugadores con muestra suficiente no se gastan créditos en líneas de jugadores
+    eligible_players = (
+        not player_df.empty
+        and ((player_df["gp"] >= config.MIN_PROP_GAMES) & (player_df["min"] >= config.MIN_PROP_MINUTES)).any()
+    )
+    today_ids = [g["game_id"] for g in games_odds if _is_on_date(g, target_date)]
+    props_by_game = odds_collector.get_player_props(today_ids) if eligible_players else {}
+    back_to_back = nba_collector.get_back_to_back_teams(target_date)
 
     # 2. Rating & Benter Engines
     rating_engine = RatingEngine()
@@ -225,28 +303,26 @@ def run_pipeline(
         game_id = game["game_id"]
         home_name = game["home_team"]
         away_name = game["away_team"]
-        commence_time = game.get("commence_time")
 
         # Strict Slate Filter: Only evaluate games tipping off on target_date in local timezone (America/Mexico_City)
-        if commence_time:
-            try:
-                c_dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
-                game_local_date = c_dt.astimezone(config.TZ_INFO).strftime("%Y-%m-%d")
-                if game_local_date != target_date:
-                    logger.info(
-                        "Ignoring game %s @ %s (local tip-off %s != target date %s)",
-                        away_name, home_name, game_local_date, target_date
-                    )
-                    continue
-            except Exception as e:
-                logger.debug("Error parsing commence_time %s: %s", commence_time, e)
+        if not _is_on_date(game, target_date):
+            logger.info("Ignoring game %s @ %s (not on target date %s)", away_name, home_name, target_date)
+            continue
 
         markets = game.get("markets", {})
 
-        home_stats = teams_by_name.get(home_name, {"pace": 100.0, "ortg": 114.0, "drtg": 114.0, "team_abbreviation": "HOME"})
-        away_stats = teams_by_name.get(away_name, {"pace": 100.0, "ortg": 114.0, "drtg": 114.0, "team_abbreviation": "AWAY"})
+        if home_name not in teams_by_name or away_name not in teams_by_name:
+            logger.error("Equipo sin ratings en %s @ %s: partido omitido.", away_name, home_name)
+            continue
+        home_stats = dict(teams_by_name[home_name])
+        away_stats = dict(teams_by_name[away_name])
 
         # Primary lines
+        # Fatiga: el equipo que jugó ayer anota menos por posesión
+        for stats in (home_stats, away_stats):
+            if stats.get("team_abbreviation") in back_to_back:
+                stats["ortg"] = stats["ortg"] * (1.0 - config.BACK_TO_BACK_ORTG_PENALTY)
+
         spread_m = markets.get("spreads", {})
         total_m = markets.get("totals", {})
         h2h_m = markets.get("h2h", {})
@@ -314,6 +390,18 @@ def run_pipeline(
             )
             candidate_bets.append(eval_spread)
 
+            if away_name in spread_m:
+                away_sp_m = spread_m[away_name]
+                candidate_bets.append(benter_engine.evaluate_bet(
+                    game_id=game_id,
+                    market="spread",
+                    selection=f"{away_name} {away_sp_m['point']:+g}",
+                    decimal_odds=away_sp_m["odds"],
+                    p_model=1.0 - p_model_cover,
+                    p_market_fair=away_sp_m["market_fair_prob"],
+                    matchup=matchup_str,
+                ))
+
         # Evaluate Totals
         if over_total_line is not None and "Over" in total_m and "Under" in total_m:
             p_model_over = sim_res.total_over_probs.get(over_total_line, 0.50)
@@ -340,6 +428,25 @@ def run_pipeline(
                 matchup=matchup_str,
             )
             candidate_bets.append(eval_under)
+
+        # Evaluate real player lines (Core)
+        if game_id in props_by_game:
+            game_players = player_df[player_df["team_abbreviation"].isin(
+                [home_stats.get("team_abbreviation"), away_stats.get("team_abbreviation")]
+            )]
+            candidate_bets.extend(evaluate_player_props(
+                game_players,
+                props_by_game[game_id],
+                game_id,
+                matchup_str,
+                {
+                    home_stats.get("team_abbreviation"): float(home_stats.get("pace", 100.0)),
+                    away_stats.get("team_abbreviation"): float(away_stats.get("pace", 100.0)),
+                },
+                sim_res.expected_pace,
+                props_model,
+                benter_engine,
+            ))
 
     # 4. Extract Candidate Player Props for Parlays (Líneas de Piso Alternativas Draftea)
         # PROHIBIDO usar las selecciones directas del Core en los parlays.

@@ -5,20 +5,40 @@ Fetches NBA markets: h2h (moneyline), spreads, totals, player props and strips b
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 import config
+from src.data.season_stats import normalize_name
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+
+def prop_events_budget(remaining: int, today: date) -> int:
+    """
+    Player-prop events affordable today, pacing the monthly quota (which resets on the 1st)
+    after setting aside the credits score markets need until then.
+    """
+    days_left = calendar.monthrange(today.year, today.month)[1] - today.day + 1
+    spendable = remaining - config.ODDS_API_CREDIT_RESERVE - days_left * config.ODDS_API_DAILY_BASE_CREDITS
+    if spendable <= 0:
+        return 0
+    events = int(spendable / days_left / len(config.PROP_MARKETS))
+    return min(events, config.MAX_PROP_EVENTS_PER_DAY)
+
+
+def _two_way_fair(price_a: float, price_b: float) -> float:
+    """De-vigged probability of the first side of a two-way market."""
+    return devig_market([price_a, price_b])[0]
 
 
 def devig_market(odds: List[float]) -> List[float]:
@@ -100,12 +120,10 @@ class OddsCollector:
             except Exception as e:
                 logger.warning("Error reading odds cache: %s", e)
 
-        # If API key is missing or dummy, generate synthetic realistic board
+        # Without a real market there are no bets: invented games must never reach the history
         if not self.api_key or self.api_key.strip() in ("", "YOUR_ODDS_API_KEY"):
-            logger.info("No ODDS_API_KEY supplied. Utilizing realistic market board fixture.")
-            odds_data = self._generate_synthetic_game_odds()
-            self._save_cache(cache_key, odds_data)
-            return odds_data
+            logger.error("No ODDS_API_KEY supplied. No games to evaluate.")
+            return []
 
         try:
             url = f"{self.base_url}/odds"
@@ -122,10 +140,114 @@ class OddsCollector:
             self._save_cache(cache_key, processed_data)
             return processed_data
         except Exception as e:
-            logger.warning("Failed to fetch odds from live API: %s. Using synthetic market.", e)
-            odds_data = self._generate_synthetic_game_odds()
-            self._save_cache(cache_key, odds_data)
-            return odds_data
+            logger.error("Failed to fetch odds from live API: %s. No games to evaluate.", type(e).__name__)
+            return []
+
+    def _remaining_credits(self) -> Optional[int]:
+        """Reads the remaining quota from the events endpoint, which does not consume credits."""
+        try:
+            res = requests.get(f"{self.base_url}/events", params={"apiKey": self.api_key}, timeout=10)
+            res.raise_for_status()
+            return int(res.headers.get("x-requests-remaining", ""))
+        except Exception as e:
+            logger.warning("Could not read Odds API quota: %s", type(e).__name__)
+            return None
+
+    def get_commence_time(self, event_id: str) -> Optional[str]:
+        """Tip-off time from the events endpoint, which does not consume credits."""
+        try:
+            res = requests.get(f"{self.base_url}/events", params={"apiKey": self.api_key}, timeout=10)
+            res.raise_for_status()
+            for event in res.json():
+                if event.get("id") == event_id:
+                    return event.get("commence_time")
+        except Exception as e:
+            logger.warning("Could not read event schedule: %s", type(e).__name__)
+        return None
+
+    def get_player_props(
+        self,
+        event_ids: List[str],
+        categories: Optional[List[str]] = None,
+        paced: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Real two-sided player lines per event: {event_id: {category: {normalized name: entry}}}.
+        Costs one credit per market and event, and stops before touching the credit reserve.
+        With paced=True, also limits events to today's share of the monthly quota.
+        """
+        if not config.ENABLE_PLAYER_PROPS or not self.api_key or not event_ids:
+            return {}
+
+        remaining = self._remaining_credits()
+        markets = [m for m, c in config.PROP_MARKETS.items() if categories is None or c in categories]
+        cost = len(markets)
+        if remaining is None:
+            return {}
+
+        max_events = (
+            prop_events_budget(remaining, datetime.now(config.TZ_INFO).date()) if paced else len(event_ids)
+        )
+
+        props: Dict[str, Dict[str, Any]] = {}
+        for event_id in event_ids[:max_events]:
+            if remaining - cost < config.ODDS_API_CREDIT_RESERVE:
+                logger.warning("Player props skipped: %d credits left, reserve is %d.", remaining, config.ODDS_API_CREDIT_RESERVE)
+                break
+            try:
+                res = requests.get(
+                    f"{self.base_url}/events/{event_id}/odds",
+                    params={
+                        "apiKey": self.api_key,
+                        "regions": self.region,
+                        "markets": ",".join(markets),
+                        "oddsFormat": "decimal",
+                    },
+                    timeout=10,
+                )
+                res.raise_for_status()
+                remaining = int(res.headers.get("x-requests-remaining", remaining - cost))
+                props[event_id] = self._parse_player_props(res.json())
+            except Exception as e:
+                logger.warning("Failed to fetch player props for event %s: %s", event_id, type(e).__name__)
+        return props
+
+    def _parse_player_props(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Price comes from the preferred book; fair probability is the consensus of books at that same line."""
+        quotes: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        for book in payload.get("bookmakers", []):
+            for market in book.get("markets", []):
+                category = config.PROP_MARKETS.get(market.get("key"))
+                if not category:
+                    continue
+                sides: Dict[Tuple[str, float], Dict[str, float]] = {}
+                for o in market.get("outcomes", []):
+                    if o.get("point") is None or o.get("name") not in ("Over", "Under"):
+                        continue
+                    sides.setdefault((str(o.get("description", "")), float(o["point"])), {})[o["name"]] = float(o["price"])
+                for (player, point), prices in sides.items():
+                    if len(prices) == 2:
+                        quotes.setdefault(category, {}).setdefault(normalize_name(player), []).append(
+                            {"book": book.get("key"), "name": player, "point": point, **prices}
+                        )
+
+        def book_rank(quote: Dict[str, Any]) -> int:
+            key = quote["book"]
+            return config.PRICE_BOOKMAKERS.index(key) if key in config.PRICE_BOOKMAKERS else len(config.PRICE_BOOKMAKERS)
+
+        parsed: Dict[str, Any] = {}
+        for category, players in quotes.items():
+            for player, player_quotes in players.items():
+                chosen = min(player_quotes, key=book_rank)
+                same_line = [q for q in player_quotes if q["point"] == chosen["point"]]
+                fair_over = sum(_two_way_fair(q["Over"], q["Under"]) for q in same_line) / len(same_line)
+                parsed.setdefault(category, {})[player] = {
+                    "name": chosen["name"],
+                    "point": chosen["point"],
+                    "Over": {"odds": chosen["Over"], "market_fair_prob": round(fair_over, 4)},
+                    "Under": {"odds": chosen["Under"], "market_fair_prob": round(1.0 - fair_over, 4)},
+                }
+        return parsed
 
     def _save_cache(self, key: str, data: Any) -> None:
         cache_path = self._get_cache_path(key)
@@ -134,6 +256,25 @@ class OddsCollector:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning("Could not write odds cache: %s", e)
+
+    @staticmethod
+    def _consensus_fair(
+        bookmakers: List[Dict[str, Any]],
+        market_key: str,
+        outcome: Dict[str, Any],
+    ) -> Tuple[float, float]:
+        """Mean de-vigged probability of an outcome across every book quoting the same line."""
+        fairs: List[float] = []
+        for book in bookmakers:
+            for m in book.get("markets", []):
+                outcomes = m.get("outcomes", [])
+                if m.get("key") != market_key or len(outcomes) != 2:
+                    continue
+                for i, o in enumerate(outcomes):
+                    if o.get("name") == outcome.get("name") and o.get("point") == outcome.get("point"):
+                        fairs.append(_two_way_fair(float(o["price"]), float(outcomes[1 - i]["price"])))
+        fair = sum(fairs) / len(fairs)
+        return fair, 1.0 - fair
 
     def _parse_and_devig_odds_api(self, raw_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Extracts markets from live Odds API JSON and computes de-vigged fair probabilities."""
@@ -161,12 +302,12 @@ class OddsCollector:
             if not bookmakers:
                 continue
 
-            # Prefer sharp books like Pinnacle or consensus average
+            # Price from the preferred book; fair probability from the consensus of all books
             selected_book = bookmakers[0]
-            for b in bookmakers:
-                if b.get("key") in ("pinnacle", "betonlineag", "draftkings"):
-                    selected_book = b
-                    break
+            for preferred in reversed(config.PRICE_BOOKMAKERS):
+                for b in bookmakers:
+                    if b.get("key") == preferred:
+                        selected_book = b
 
             markets_map: Dict[str, Any] = {}
             for m in selected_book.get("markets", []):
@@ -175,7 +316,7 @@ class OddsCollector:
                 if key == "h2h" and len(outcomes) == 2:
                     o1, o2 = outcomes[0], outcomes[1]
                     price1, price2 = float(o1["price"]), float(o2["price"])
-                    fair1, fair2 = devig_market([price1, price2])
+                    fair1, fair2 = self._consensus_fair(bookmakers, key, o1)
                     markets_map["h2h"] = {
                         o1["name"]: {"odds": price1, "market_fair_prob": fair1},
                         o2["name"]: {"odds": price2, "market_fair_prob": fair2},
@@ -183,7 +324,7 @@ class OddsCollector:
                 elif key == "spreads" and len(outcomes) == 2:
                     o1, o2 = outcomes[0], outcomes[1]
                     price1, price2 = float(o1["price"]), float(o2["price"])
-                    fair1, fair2 = devig_market([price1, price2])
+                    fair1, fair2 = self._consensus_fair(bookmakers, key, o1)
                     markets_map["spreads"] = {
                         o1["name"]: {"point": float(o1.get("point", 0.0)), "odds": price1, "market_fair_prob": fair1},
                         o2["name"]: {"point": float(o2.get("point", 0.0)), "odds": price2, "market_fair_prob": fair2},
@@ -191,7 +332,7 @@ class OddsCollector:
                 elif key == "totals" and len(outcomes) == 2:
                     o1, o2 = outcomes[0], outcomes[1]
                     price1, price2 = float(o1["price"]), float(o2["price"])
-                    fair1, fair2 = devig_market([price1, price2])
+                    fair1, fair2 = self._consensus_fair(bookmakers, key, o1)
                     markets_map["totals"] = {
                         o1["name"]: {"point": float(o1.get("point", 220.0)), "odds": price1, "market_fair_prob": fair1},
                         o2["name"]: {"point": float(o2.get("point", 220.0)), "odds": price2, "market_fair_prob": fair2},
@@ -205,78 +346,3 @@ class OddsCollector:
                 "markets": markets_map,
             })
         return parsed_games
-
-    def _generate_synthetic_game_odds(self) -> List[Dict[str, Any]]:
-        """Deterministic baseline slate for offline runs and testing."""
-        today_str = datetime.now(config.TZ_INFO).strftime("%Y-%m-%d")
-        games = [
-            {
-                "game_id": f"nba_{today_str}_dal_bos",
-                "home_team": "Boston Celtics",
-                "away_team": "Dallas Mavericks",
-                "commence_time": f"{today_str}T23:30:00Z",
-                "markets": {
-                    "h2h": {
-                        "Boston Celtics": {"odds": 1.55, "market_fair_prob": 0.621},
-                        "Dallas Mavericks": {"odds": 2.55, "market_fair_prob": 0.379},
-                    },
-                    "spreads": {
-                        "Boston Celtics": {"point": -5.5, "odds": 1.91, "market_fair_prob": 0.50},
-                        "Dallas Mavericks": {"point": 5.5, "odds": 1.91, "market_fair_prob": 0.50},
-                    },
-                    "totals": {
-                        "Over": {"point": 226.5, "odds": 1.90, "market_fair_prob": 0.502},
-                        "Under": {"point": 226.5, "odds": 1.92, "market_fair_prob": 0.498},
-                    },
-                },
-            },
-            {
-                "game_id": f"nba_{today_str}_den_okc",
-                "home_team": "Oklahoma City Thunder",
-                "away_team": "Denver Nuggets",
-                "commence_time": f"{today_str}T23:59:00Z",
-                "markets": {
-                    "h2h": {
-                        "Oklahoma City Thunder": {"odds": 1.70, "market_fair_prob": 0.565},
-                        "Denver Nuggets": {"odds": 2.20, "market_fair_prob": 0.435},
-                    },
-                    "spreads": {
-                        "Oklahoma City Thunder": {"point": -2.5, "odds": 1.92, "market_fair_prob": 0.498},
-                        "Denver Nuggets": {"point": 2.5, "odds": 1.90, "market_fair_prob": 0.502},
-                    },
-                    "totals": {
-                        "Over": {"point": 222.0, "odds": 1.88, "market_fair_prob": 0.508},
-                        "Under": {"point": 222.0, "odds": 1.94, "market_fair_prob": 0.492},
-                    },
-                },
-            },
-            {
-                "game_id": f"nba_{today_str}_gsw_lal",
-                "home_team": "Los Angeles Lakers",
-                "away_team": "Golden State Warriors",
-                "commence_time": f"{today_str}T23:45:00Z",
-                "markets": {
-                    "h2h": {
-                        "Los Angeles Lakers": {"odds": 1.85, "market_fair_prob": 0.521},
-                        "Golden State Warriors": {"odds": 1.98, "market_fair_prob": 0.479},
-                    },
-                    "spreads": {
-                        "Los Angeles Lakers": {"point": -1.5, "odds": 1.91, "market_fair_prob": 0.50},
-                        "Golden State Warriors": {"point": 1.5, "odds": 1.91, "market_fair_prob": 0.50},
-                    },
-                    "totals": {
-                        "Over": {"point": 229.5, "odds": 1.91, "market_fair_prob": 0.50},
-                        "Under": {"point": 229.5, "odds": 1.91, "market_fair_prob": 0.50},
-                    },
-                },
-            },
-        ]
-        # Re-verify and standardize de-vigging
-        for g in games:
-            for m_key, m_val in g["markets"].items():
-                items = list(m_val.items())
-                odds_list = [items[0][1]["odds"], items[1][1]["odds"]]
-                fair_probs = devig_market(odds_list)
-                items[0][1]["market_fair_prob"] = round(fair_probs[0], 4)
-                items[1][1]["market_fair_prob"] = round(fair_probs[1], 4)
-        return games

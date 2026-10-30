@@ -22,11 +22,42 @@ from nba_api.stats.endpoints import scoreboardv2
 import config
 from src.data.espn_collector import ESPNDataCollector
 from src.data.nba_collector import NBA_STATS_HEADERS
+from src.data.season_stats import normalize_name
 from src.utils.notifier import TelegramNotifier
 
 logger = logging.getLogger("settle_nba")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+TEAM_ABBR_ALIASES: Dict[str, str] = {
+    "GS": "GSW", "GSW": "GS",
+    "NO": "NOP", "NOP": "NO",
+    "NY": "NYK", "NYK": "NY",
+    "SA": "SAS", "SAS": "SA",
+    "UTAH": "UTA", "UTA": "UTAH",
+    "WSH": "WAS", "WAS": "WSH",
+}
+
+
+def _find_team(team_picked: str, scores: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Exact key first, then partial match on full names only: 'SA' must never match 'Sacramento Kings'."""
+    team_info = scores.get(team_picked)
+    if team_info:
+        return team_info
+    picked = team_picked.lower()
+    for k, v in scores.items():
+        if " " in k and (k.lower() in picked or picked in k.lower()):
+            return v
+    return None
+
+
+def _find_player(p_name: str, p_stats_map: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    target = normalize_name(p_name)
+    for k, v in p_stats_map.items():
+        if normalize_name(k) == target:
+            return v
+    return None
 
 
 class SettlementEngine:
@@ -81,6 +112,13 @@ class SettlementEngine:
         sat_pnl = 0.0
         sat_staked = 0.0
 
+        brier_model_sum = 0.0
+        brier_market_sum = 0.0
+        brier_n = 0
+        clv_sum = 0.0
+        clv_n = 0
+        by_market: Dict[str, Dict[str, float]] = {}
+
         if master_file.exists():
             try:
                 df = pd.read_csv(master_file)
@@ -120,6 +158,28 @@ class SettlementEngine:
                                     core_lost += 1
                                 elif res == "PUSH":
                                     core_push += 1
+
+                                m_stats = by_market.setdefault(
+                                    str(row.get("market", "")), {"bets": 0, "won": 0, "lost": 0, "pnl": 0.0, "staked": 0.0}
+                                )
+                                m_stats["bets"] += 1
+                                m_stats["won"] += int(res == "WON")
+                                m_stats["lost"] += int(res == "LOST")
+                                m_stats["pnl"] = round(m_stats["pnl"] + pnl_val, 2)
+                                m_stats["staked"] = round(m_stats["staked"] + stake_val, 2)
+
+                                model_p = pd.to_numeric(row.get("model_prob"), errors="coerce")
+                                market_p = pd.to_numeric(row.get("market_fair_prob"), errors="coerce")
+                                if res != "PUSH" and pd.notna(model_p) and pd.notna(market_p):
+                                    outcome = 1.0 if res == "WON" else 0.0
+                                    brier_model_sum += (model_p - outcome) ** 2
+                                    brier_market_sum += (market_p - outcome) ** 2
+                                    brier_n += 1
+
+                                clv = pd.to_numeric(row.get("clv_percent"), errors="coerce")
+                                if pd.notna(clv):
+                                    clv_sum += clv
+                                    clv_n += 1
             except Exception as e:
                 logger.debug("Error computing historical stats from %s: %s", master_file.name, e)
 
@@ -145,6 +205,11 @@ class SettlementEngine:
                 "total_staked": round(core_staked, 2),
                 "roi_percent": round(core_roi, 2),
                 "winrate": round(core_wr, 1),
+                "brier_model": round(brier_model_sum / brier_n, 4) if brier_n else None,
+                "brier_market": round(brier_market_sum / brier_n, 4) if brier_n else None,
+                "clv_avg": round(clv_sum / clv_n, 2) if clv_n else None,
+                "clv_n": clv_n,
+                "by_market": by_market,
             },
             "satellite": {
                 "won": sat_won,
@@ -186,19 +251,10 @@ class SettlementEngine:
                 info_h = {"pts": h_pts, "opponent_pts": a_pts, "team_name": h_name, "event_id": event_id}
                 info_a = {"pts": a_pts, "opponent_pts": h_pts, "team_name": a_name, "event_id": event_id}
 
-                abbr_alias_map = {
-                    "GS": "GSW", "GSW": "GS",
-                    "NO": "NOP", "NOP": "NO",
-                    "NY": "NYK", "NYK": "NY",
-                    "SA": "SAS", "SAS": "SA",
-                    "UTAH": "UTA", "UTA": "UTAH",
-                    "WSH": "WAS", "WAS": "WSH",
-                }
-
                 if h_abbr:
                     scores[h_abbr] = info_h
-                    if h_abbr in abbr_alias_map:
-                        scores[abbr_alias_map[h_abbr]] = info_h
+                    if h_abbr in TEAM_ABBR_ALIASES:
+                        scores[TEAM_ABBR_ALIASES[h_abbr]] = info_h
                 name_alias_map = {
                     "LA Clippers": "Los Angeles Clippers",
                     "Los Angeles Clippers": "LA Clippers",
@@ -213,8 +269,8 @@ class SettlementEngine:
 
                 if a_abbr:
                     scores[a_abbr] = info_a
-                    if a_abbr in abbr_alias_map:
-                        scores[abbr_alias_map[a_abbr]] = info_a
+                    if a_abbr in TEAM_ABBR_ALIASES:
+                        scores[TEAM_ABBR_ALIASES[a_abbr]] = info_a
                 if a_name:
                     scores[a_name] = info_a
                     if a_name in name_alias_map:
@@ -292,13 +348,7 @@ class SettlementEngine:
         # 1. Moneyline
         if market == "moneyline":
             team_picked = selection.replace(" ML", "").strip()
-            team_info = scores.get(team_picked)
-            if not team_info:
-                # Search partial
-                for k, v in scores.items():
-                    if k.lower() in team_picked.lower() or team_picked.lower() in k.lower():
-                        team_info = v
-                        break
+            team_info = _find_team(team_picked, scores)
 
             if not team_info:
                 return "PENDING", 0.0
@@ -317,12 +367,7 @@ class SettlementEngine:
             if m:
                 team_picked = m.group(1).strip()
                 spread_val = float(m.group(2))
-                team_info = scores.get(team_picked)
-                if not team_info:
-                    for k, v in scores.items():
-                        if k.lower() in team_picked.lower() or team_picked.lower() in k.lower():
-                            team_info = v
-                            break
+                team_info = _find_team(team_picked, scores)
 
                 if not team_info:
                     return "PENDING", 0.0
@@ -357,7 +402,7 @@ class SettlementEngine:
                 if total_pts is None:
                     game_id = str(row.get("game_id", "")).lower()
                     for k, v in scores.items():
-                        if k.lower() in game_id or k.lower() in matchup_str.lower():
+                        if " " in k and (k.lower() in game_id or k.lower() in matchup_str.lower()):
                             total_pts = v["pts"] + v["opponent_pts"]
                             break
 
@@ -381,12 +426,44 @@ class SettlementEngine:
             else:
                 return "PENDING", 0.0
 
-        # 4. Satellite Parlay
+        # 4. Player prop at a real line: 'Name Over 28.5 PTS'
+        elif market == "player_prop":
+            m = re.search(r"^(.*)\s(Over|Under)\s(\d+\.?\d*)\s([A-Za-z0-9]+)$", selection)
+            matchup_str = str(row.get("matchup", ""))
+            if not m or "@" not in matchup_str:
+                return "PENDING", 0.0
+
+            game_teams = [_find_team(t.strip(), scores) for t in matchup_str.split("@", 1)]
+            p_stats_map = scores.get("__player_stats__", {})
+            if not all(game_teams) or not p_stats_map:
+                return "PENDING", 0.0
+
+            matched_stats = _find_player(m.group(1), p_stats_map)
+            actual_val = matched_stats.get(m.group(4).lower()) if matched_stats else None
+            if actual_val is None:
+                # DNP voids the bet, but only once both box scores of the game have arrived
+                teams_with_box = {str(v.get("team", "")) for v in p_stats_map.values()}
+                for info in game_teams:
+                    abbrs = [k for k, v in scores.items() if v is info and " " not in k]
+                    if not any(a in teams_with_box for a in abbrs):
+                        return "PENDING", 0.0
+                result = "PUSH"
+            else:
+                line = float(m.group(3))
+                value = float(actual_val)
+                if value == line:
+                    result = "PUSH"
+                elif (value > line) == (m.group(2) == "Over"):
+                    result = "WON"
+                else:
+                    result = "LOST"
+
+        # 5. Satellite Parlay
         elif market == "player_props_parlay":
             details = str(row.get("details", ""))
             # Extract legs directly from details
             legs = re.findall(
-                r"([A-Za-z\s\.\'\-]+?)\s*\(([A-Z]+)\)\s*(?:vs\s*[A-Z]+\s*➔\s*)?(Over|Under)\s*([\d\.]+)\s*([A-Za-z0-9]+)",
+                r"([\w\s\.\'\-]+?)\s*\(([A-Z]+)\)\s*(?:vs\s*[A-Z]+\s*➔\s*)?(Over|Under)\s*([\d\.]+)\s*([A-Za-z0-9]+)",
                 details,
             )
             if not legs:
@@ -399,47 +476,42 @@ class SettlementEngine:
                 # One or more games in the parlay haven't finished yet
                 return "PENDING", 0.0
 
-            # When all games are finished, evaluate individual player props if available
+            # A ticket only wins when every leg is verified against the box score.
             p_stats_map = scores.get("__player_stats__", {})
+            if not p_stats_map:
+                return "PENDING", 0.0
 
-            if legs and p_stats_map:
-                all_legs_won = True
-                any_leg_lost = False
-                legs_evaluated = 0
+            teams_with_box = {str(v.get("team", "")) for v in p_stats_map.values()}
+            any_leg_lost = False
+            any_leg_void = False
+            any_box_missing = False
 
-                for p_name, p_team, direction, line_str, category in legs:
-                    p_name_clean = p_name.strip().lower()
-                    target_line = float(line_str)
-                    cat_key = category.strip().lower()
+            for p_name, p_team, direction, line_str, category in legs:
+                target_line = float(line_str)
+                matched_stats = _find_player(p_name, p_stats_map)
+                actual_val = matched_stats.get(category.strip().lower()) if matched_stats else None
 
-                    matched_stats = None
-                    for k, v in p_stats_map.items():
-                        if p_name_clean in k or k in p_name_clean:
-                            matched_stats = v
-                            break
+                if actual_val is None:
+                    # Box score present without the player means DNP; absent box score may still arrive.
+                    if p_team in teams_with_box or TEAM_ABBR_ALIASES.get(p_team) in teams_with_box:
+                        any_leg_void = True
+                    else:
+                        any_box_missing = True
+                    continue
 
-                    if matched_stats:
-                        actual_val = float(matched_stats.get(cat_key, matched_stats.get(cat_key[:3], 0.0)))
-                        legs_evaluated += 1
-                        if direction == "Over":
-                            if actual_val <= target_line:
-                                any_leg_lost = True
-                                all_legs_won = False
-                                break
-                        else:  # Under
-                            if actual_val >= target_line:
-                                any_leg_lost = True
-                                all_legs_won = False
-                                break
+                if direction == "Over" and float(actual_val) <= target_line:
+                    any_leg_lost = True
+                elif direction == "Under" and float(actual_val) >= target_line:
+                    any_leg_lost = True
 
-                if any_leg_lost:
-                    result = "LOST"
-                elif all_legs_won and legs_evaluated == len(legs):
-                    result = "WON"
-                else:
-                    result = "WON" if odds <= 12.0 else "LOST"
+            if any_leg_lost:
+                result = "LOST"
+            elif any_box_missing:
+                return "PENDING", 0.0
+            elif any_leg_void:
+                result = "PUSH"
             else:
-                result = "WON" if odds <= 12.0 else "LOST"
+                result = "WON"
 
         if result == "PENDING":
             return "PENDING", 0.0
@@ -489,6 +561,13 @@ class SettlementEngine:
         if df.empty:
             return {"status": "EMPTY", "message": "Picks file is empty."}
 
+        # PnL already applied to the bankroll by earlier runs of this date
+        previous_core_pnl = sum(
+            float(r.get("pnl", 0.0))
+            for r in df.to_dict(orient="records")
+            if r.get("status") == "SETTLED" and not self.is_satellite_bet(r)
+        )
+
         settled_rows = []
         total_pnl = 0.0
         total_staked = 0.0
@@ -511,6 +590,9 @@ class SettlementEngine:
         for _, row in df.iterrows():
             row_dict = row.to_dict()
             res, pnl = self.settle_single_bet(row_dict, scores)
+            if res == "PENDING" and row_dict.get("status") == "SETTLED":
+                # Missing data on a re-run never undoes a settled result
+                res, pnl = str(row_dict["result"]), float(row_dict["pnl"])
             if res == "PENDING":
                 row_dict["status"] = "PENDING"
                 row_dict["result"] = "PENDING"
@@ -592,14 +674,16 @@ class SettlementEngine:
             )
         logger.info("Generated settlement sentinel: %s", sentinel.name)
 
-        # Sincronización de Bankroll State: sumar el PnL neto de las posiciones recién liquidadas
+        # Sincronización de Bankroll State: solo el PnL Core aún no aplicado.
+        # El Satellite usa cuotas estimadas y queda fuera del bankroll hasta tener líneas reales.
         try:
+            core_delta = round(core_pnl - previous_core_pnl, 2)
             current_bankroll = config.get_current_bankroll(state_file=self.bankroll_state_file)
-            updated_bankroll = max(0.0, round(current_bankroll + total_pnl, 2))
+            updated_bankroll = max(0.0, round(current_bankroll + core_delta, 2))
             config.set_current_bankroll(updated_bankroll, state_file=self.bankroll_state_file)
             logger.info(
-                "[BANKROLL SYNC] Saldo actualizado post-liquidación: $%0.2f MXN (PnL neto del día: %+0.2f MXN)",
-                updated_bankroll, total_pnl
+                "[BANKROLL SYNC] Saldo actualizado post-liquidación: $%0.2f MXN (PnL Core aplicado: %+0.2f MXN)",
+                updated_bankroll, core_delta
             )
         except Exception as e:
             logger.warning("No se pudo actualizar el estado de bankroll post-liquidación: %s", e)

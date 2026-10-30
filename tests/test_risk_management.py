@@ -190,7 +190,7 @@ def test_set_bankroll_cli(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "[BANKROLL ACTUALIZADO] Saldo base configurado en: $1250.00 MXN" in captured.out
     assert "Nuevo techo de Kelly (1.75%): $21.88 MXN" in captured.out
-    assert "Nuevo piso operativo (1.00%): $12.50 MXN" in captured.out
+    assert "Nuevo piso operativo (0.50%): $6.25 MXN" in captured.out
 
     # Verify JSON file structure
     assert test_state_file.exists()

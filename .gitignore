@@ -21,6 +21,7 @@ htmlcov/
 data/cache/*
 !data/cache/.gitkeep
 !data/cache/*2025_26.json
+!data/cache/*2026_27.json
 
 # IDEs y editores
 .idea/

@@ -1,23 +1,21 @@
 """
-NBA Data Collector with Rate-Limiting, Resilient Retries, and Local Caching.
-Ingests team and player statistics from stats.nba.com via nba_api.
+NBA Data Collector.
+Serves team and player statistics of the current season from ESPN box scores,
+using the last season's reference table as a fading baseline.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import random
-import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
-from nba_api.stats.endpoints import leaguedashteamstats, leaguedashplayerstats, scoreboardv2
 
 import config
+from src.data.espn_collector import ESPNDataCollector
+from src.data.season_stats import SeasonStatsStore, build_player_stats, build_team_ratings, injury_scoring_loss
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -39,7 +37,7 @@ NBA_STATS_HEADERS: Dict[str, str] = {
     "Connection": "keep-alive",
 }
 
-# 30 NBA Teams reference for baseline fallback
+# 30 NBA Teams reference: prior for the ratings, named as The Odds API names them
 NBA_TEAMS_REFERENCE = [
     {"team_id": 1610612737, "team_abbreviation": "ATL", "team_name": "Atlanta Hawks", "pace": 101.5, "ortg": 114.2, "drtg": 116.1},
     {"team_id": 1610612738, "team_abbreviation": "BOS", "team_name": "Boston Celtics", "pace": 98.2, "ortg": 121.5, "drtg": 110.2},
@@ -53,7 +51,7 @@ NBA_TEAMS_REFERENCE = [
     {"team_id": 1610612744, "team_abbreviation": "GSW", "team_name": "Golden State Warriors", "pace": 100.8, "ortg": 116.0, "drtg": 112.1},
     {"team_id": 1610612745, "team_abbreviation": "HOU", "team_name": "Houston Rockets", "pace": 99.4, "ortg": 114.8, "drtg": 110.5},
     {"team_id": 1610612754, "team_abbreviation": "IND", "team_name": "Indiana Pacers", "pace": 102.8, "ortg": 117.9, "drtg": 117.0},
-    {"team_id": 1610612746, "team_abbreviation": "LAC", "team_name": "LA Clippers", "pace": 97.9, "ortg": 114.2, "drtg": 112.5},
+    {"team_id": 1610612746, "team_abbreviation": "LAC", "team_name": "Los Angeles Clippers", "pace": 97.9, "ortg": 114.2, "drtg": 112.5},
     {"team_id": 1610612747, "team_abbreviation": "LAL", "team_name": "Los Angeles Lakers", "pace": 100.5, "ortg": 115.6, "drtg": 114.9},
     {"team_id": 1610612763, "team_abbreviation": "MEM", "team_name": "Memphis Grizzlies", "pace": 102.5, "ortg": 116.8, "drtg": 111.9},
     {"team_id": 1610612748, "team_abbreviation": "MIA", "team_name": "Miami Heat", "pace": 97.2, "ortg": 112.7, "drtg": 112.3},
@@ -75,196 +73,63 @@ NBA_TEAMS_REFERENCE = [
 
 
 class NBADataCollector:
-    """Ingests, cleans, caches and serves team and player statistics."""
+    """Serves current-season team ratings and player averages, adjusted for injuries."""
 
     def __init__(
         self,
         cache_dir: Optional[Path] = None,
-        ttl_hours: int = config.CACHE_TTL_HOURS,
-        request_delay: float = 1.0,
-        max_retries: int = 3,
+        espn: Optional[ESPNDataCollector] = None,
     ) -> None:
         self.cache_dir: Path = cache_dir or config.CACHE_DIR
-        self.ttl_hours: int = ttl_hours
-        self.request_delay: float = request_delay
-        self.max_retries: int = max_retries
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.espn: ESPNDataCollector = espn or ESPNDataCollector(cache_dir=self.cache_dir)
+        self.store = SeasonStatsStore(espn=self.espn, store_file=self.cache_dir / config.SEASON_STORE_FILE)
+        self._games: Optional[List[Dict[str, Any]]] = None
+        self._injuries: Optional[Dict[str, str]] = None
 
-    def _get_cache_path(self, key: str) -> Path:
-        return self.cache_dir / f"{key}.json"
+    def _season_games(self) -> List[Dict[str, Any]]:
+        if self._games is None:
+            self._games = self.store.update(datetime.now(config.TZ_INFO).date())
+            logger.info("Current season sample: %d finished games.", len(self._games))
+        return self._games
 
-    def _is_cache_valid(self, cache_file: Path) -> bool:
-        if not cache_file.exists():
-            return False
-        try:
-            mtime = cache_file.stat().st_mtime
-            age_hours = (time.time() - mtime) / 3600.0
-            return age_hours < self.ttl_hours
-        except Exception:
-            return False
+    def _get_injuries(self) -> Dict[str, str]:
+        if self._injuries is None:
+            self._injuries = self.espn.get_injuries()
+        return self._injuries
 
-    def _read_cache(self, key: str) -> Optional[Any]:
-        cache_path = self._get_cache_path(key)
-        if self._is_cache_valid(cache_path):
-            try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    logger.info("Loaded '%s' from valid local cache (%s)", key, cache_path.name)
-                    return json.load(f)
-            except Exception as e:
-                logger.warning("Error reading cache for '%s': %s", key, e)
-        return None
-
-    def _write_cache(self, key: str, data: Any) -> None:
-        cache_path = self._get_cache_path(key)
-        try:
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info("Cached '%s' to %s", key, cache_path.name)
-        except Exception as e:
-            logger.warning("Could not write cache for '%s': %s", key, e)
-
-    def _retry_api_call(self, endpoint_fn: Any, **kwargs: Any) -> Any:
-        """Executes API call with exponential backoff and jitter."""
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                time.sleep(self.request_delay + random.uniform(0.1, 0.4))
-                res = endpoint_fn(headers=NBA_STATS_HEADERS, timeout=12, **kwargs)
-                return res
-            except Exception as e:
-                wait_time = (2 ** attempt) + random.uniform(0.2, 0.8)
-                logger.warning(
-                    "API call failed (attempt %d/%d): %s. Backing off for %.2fs...",
-                    attempt, self.max_retries, e, wait_time
-                )
-                if attempt == self.max_retries:
-                    raise
-                time.sleep(wait_time)
-
-    def get_team_stats(
-        self,
-        season: str = config.BASELINE_SEASON,
-        force_refresh: bool = False,
-    ) -> pd.DataFrame:
+    def get_team_stats(self, force_refresh: bool = False) -> pd.DataFrame:
         """
-        Retrieves Team Pace, ORtg, DRtg and baseline league stats.
-        Forces regular season baseline (preseason data prohibited for ratings).
+        Team pace, ORtg and DRtg of the current season blended with last season's baseline,
+        with offense reduced for players ruled Out.
         Columns guaranteed:
-        ['team_id', 'team_name', 'team_abbreviation', 'pace', 'ortg', 'drtg', 'pts', 'gp']
+        ['team_id', 'team_name', 'team_abbreviation', 'pace', 'ortg', 'drtg', 'pts', 'gp', 'season_gp', 'injury_loss']
         """
-        target_season = config.BASELINE_SEASON  # Enforce historical baseline
-        cache_key = f"team_stats_{target_season.replace('-', '_')}"
-        if not force_refresh:
-            cached = self._read_cache(cache_key)
-            if cached:
-                return pd.DataFrame(cached)
+        games = self._season_games()
+        ratings = build_team_ratings(games, pd.DataFrame(NBA_TEAMS_REFERENCE))
+        losses = injury_scoring_loss(build_player_stats(games), self._get_injuries())
+        ratings["injury_loss"] = ratings["team_abbreviation"].map(losses).fillna(0.0)
+        ratings["ortg"] = (ratings["ortg"] * (1.0 - ratings["injury_loss"])).round(2)
+        for team, loss in losses.items():
+            logger.info("Injury adjustment for %s: ORtg -%.1f%%", team, loss * 100.0)
+        return ratings
 
-        logger.info(
-            "Fetching Team Stats from stats.nba.com for baseline season %s (SeasonType='Regular Season')...",
-            target_season,
-        )
-        try:
-            res = self._retry_api_call(
-                leaguedashteamstats.LeagueDashTeamStats,
-                season=target_season,
-                season_type_all_star="Regular Season",
-                per_mode_detailed="PerGame",
-                measure_type_detailed_defense="Advanced",
-            )
-            data_frames = res.get_data_frames()
-            if not data_frames or data_frames[0].empty:
-                raise ValueError("Empty response received from NBA API.")
-
-            raw_df = data_frames[0]
-            # Standardize column naming
-            df = pd.DataFrame()
-            df["team_id"] = raw_df["TEAM_ID"]
-            df["team_name"] = raw_df["TEAM_NAME"]
-            df["team_abbreviation"] = raw_df.get("TEAM_ABBREVIATION", "")
-            df["pace"] = pd.to_numeric(raw_df.get("PACE", 100.0), errors="coerce").fillna(100.0)
-            df["ortg"] = pd.to_numeric(raw_df.get("OFF_RATING", 114.0), errors="coerce").fillna(114.0)
-            df["drtg"] = pd.to_numeric(raw_df.get("DEF_RATING", 114.0), errors="coerce").fillna(114.0)
-            df["pts"] = pd.to_numeric(raw_df.get("PTS", 112.0), errors="coerce").fillna(112.0)
-            df["gp"] = pd.to_numeric(raw_df.get("GP", 82), errors="coerce").fillna(82)
-
-            self._write_cache(cache_key, df.to_dict(orient="records"))
-            return df
-        except Exception as e:
-            logger.error("Failed to retrieve live team stats: %s. Falling back to reference baseline.", e)
-            fallback_df = pd.DataFrame(NBA_TEAMS_REFERENCE)
-            fallback_df["pts"] = fallback_df["ortg"] * (fallback_df["pace"] / 100.0)
-            fallback_df["gp"] = 70
-            self._write_cache(cache_key, fallback_df.to_dict(orient="records"))
-            return fallback_df
-
-    def get_player_stats(
-        self,
-        season: str = config.BASELINE_SEASON,
-        force_refresh: bool = False,
-    ) -> pd.DataFrame:
+    def get_player_stats(self, force_refresh: bool = False) -> pd.DataFrame:
         """
-        Retrieves Player stats: minutes, usage, points, rebounds, assists, 3-pointers.
-        Forces regular season baseline (preseason stats prohibited).
-        Columns guaranteed:
-        ['player_id', 'player_name', 'team_id', 'team_abbreviation', 'min', 'usg_pct', 'pts', 'reb', 'ast', 'fg3m']
+        Current-season per-game averages, leaving out anyone on the injury report.
+        Empty when the season has too few games: never falls back to old rosters.
         """
-        target_season = config.BASELINE_SEASON
-        cache_key = f"player_stats_{target_season.replace('-', '_')}"
-        if not force_refresh:
-            cached = self._read_cache(cache_key)
-            if cached:
-                return pd.DataFrame(cached)
+        players = build_player_stats(self._season_games())
+        if players.empty:
+            return players
+        injured = self._get_injuries()
+        return players[~players["player_name"].str.lower().isin(injured)].reset_index(drop=True)
 
-        logger.info(
-            "Fetching Player Stats from stats.nba.com for baseline season %s (SeasonType='Regular Season')...",
-            target_season,
-        )
-        try:
-            # Usage and advanced stats
-            res_adv = self._retry_api_call(
-                leaguedashplayerstats.LeagueDashPlayerStats,
-                season=target_season,
-                season_type_all_star="Regular Season",
-                per_mode_detailed="PerGame",
-                measure_type_detailed_defense="Advanced",
-            )
-            df_adv = res_adv.get_data_frames()[0]
-
-            # Traditional stats for points, rebounds, assists, triples
-            res_trad = self._retry_api_call(
-                leaguedashplayerstats.LeagueDashPlayerStats,
-                season=target_season,
-                season_type_all_star="Regular Season",
-                per_mode_detailed="PerGame",
-                measure_type_detailed_defense="Base",
-            )
-            df_trad = res_trad.get_data_frames()[0]
-
-            merged = pd.merge(
-                df_trad[["PLAYER_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION", "MIN", "PTS", "REB", "AST", "FG3M"]],
-                df_adv[["PLAYER_ID", "USG_PCT"]],
-                on="PLAYER_ID",
-                how="left",
-            )
-
-            df = pd.DataFrame()
-            df["player_id"] = merged["PLAYER_ID"]
-            df["player_name"] = merged["PLAYER_NAME"]
-            df["team_id"] = merged["TEAM_ID"]
-            df["team_abbreviation"] = merged["TEAM_ABBREVIATION"]
-            df["min"] = pd.to_numeric(merged["MIN"], errors="coerce").fillna(0.0)
-            df["usg_pct"] = pd.to_numeric(merged["USG_PCT"], errors="coerce").fillna(0.20)
-            df["pts"] = pd.to_numeric(merged["PTS"], errors="coerce").fillna(0.0)
-            df["reb"] = pd.to_numeric(merged["REB"], errors="coerce").fillna(0.0)
-            df["ast"] = pd.to_numeric(merged["AST"], errors="coerce").fillna(0.0)
-            df["fg3m"] = pd.to_numeric(merged["FG3M"], errors="coerce").fillna(0.0)
-
-            self._write_cache(cache_key, df.to_dict(orient="records"))
-            return df
-        except Exception as e:
-            logger.error("Failed to retrieve live player stats: %s. Generating baseline stars fallback.", e)
-            fallback_players = self._generate_fallback_players()
-            self._write_cache(cache_key, fallback_players.to_dict(orient="records"))
-            return fallback_players
+    def get_back_to_back_teams(self, target_date: str) -> set[str]:
+        """Teams that played the day before target_date."""
+        self._season_games()
+        day = datetime.strptime(target_date, "%Y-%m-%d").date()
+        return self.store.teams_played_on(day - timedelta(days=1))
 
     def get_league_averages(self, team_df: pd.DataFrame) -> Dict[str, float]:
         """Calculates baseline league-wide pace, offensive rating and defensive rating."""
@@ -276,31 +141,3 @@ class NBADataCollector:
             "drtg": float(team_df["drtg"].mean()),
             "pts": float(team_df["pts"].mean()),
         }
-
-    def _generate_fallback_players(self) -> pd.DataFrame:
-        """Realistic sample player roster with key starters and props benchmarks across all 30 teams."""
-        cache_path = self.cache_dir / "player_stats_2025_26.json"
-        if cache_path.exists():
-            try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list) and len(data) > 0:
-                        return pd.DataFrame(data)
-            except Exception as e:
-                logger.warning("Error reading %s for fallback: %s", cache_path.name, e)
-
-        sample = [
-            {"player_id": 1629029, "player_name": "Luka Doncic", "team_id": 1610612742, "team_abbreviation": "DAL", "min": 36.8, "usg_pct": 0.355, "pts": 32.4, "reb": 8.6, "ast": 9.4, "fg3m": 3.8},
-            {"player_id": 202681, "player_name": "Kyrie Irving", "team_id": 1610612742, "team_abbreviation": "DAL", "min": 34.5, "usg_pct": 0.278, "pts": 25.1, "reb": 4.9, "ast": 5.2, "fg3m": 2.9},
-            {"player_id": 1628369, "player_name": "Jayson Tatum", "team_id": 1610612738, "team_abbreviation": "BOS", "min": 35.7, "usg_pct": 0.301, "pts": 27.2, "reb": 8.4, "ast": 5.1, "fg3m": 3.2},
-            {"player_id": 1627759, "player_name": "Jaylen Brown", "team_id": 1610612738, "team_abbreviation": "BOS", "min": 33.6, "usg_pct": 0.285, "pts": 23.5, "reb": 5.8, "ast": 3.6, "fg3m": 2.4},
-            {"player_id": 203999, "player_name": "Nikola Jokic", "team_id": 1610612743, "team_abbreviation": "DEN", "min": 35.1, "usg_pct": 0.292, "pts": 26.8, "reb": 12.3, "ast": 9.8, "fg3m": 1.2},
-            {"player_id": 1627750, "player_name": "Jamal Murray", "team_id": 1610612743, "team_abbreviation": "DEN", "min": 32.8, "usg_pct": 0.254, "pts": 21.2, "reb": 4.1, "ast": 6.5, "fg3m": 2.5},
-            {"player_id": 1628983, "player_name": "Shai Gilgeous-Alexander", "team_id": 1610612760, "team_abbreviation": "OKC", "min": 34.4, "usg_pct": 0.324, "pts": 30.5, "reb": 5.6, "ast": 6.4, "fg3m": 1.4},
-            {"player_id": 1631097, "player_name": "Jalen Williams", "team_id": 1610612760, "team_abbreviation": "OKC", "min": 31.8, "usg_pct": 0.231, "pts": 19.4, "reb": 4.2, "ast": 4.6, "fg3m": 1.5},
-            {"player_id": 1630162, "player_name": "Anthony Edwards", "team_id": 1610612750, "team_abbreviation": "MIN", "min": 35.3, "usg_pct": 0.315, "pts": 26.5, "reb": 5.4, "ast": 5.1, "fg3m": 2.8},
-            {"player_id": 1629630, "player_name": "Ja Morant", "team_id": 1610612763, "team_abbreviation": "MEM", "min": 32.5, "usg_pct": 0.310, "pts": 24.8, "reb": 5.3, "ast": 8.1, "fg3m": 1.8},
-            {"player_id": 1630559, "player_name": "Cade Cunningham", "team_id": 1610612765, "team_abbreviation": "DET", "min": 34.0, "usg_pct": 0.298, "pts": 23.1, "reb": 4.4, "ast": 7.6, "fg3m": 2.0},
-            {"player_id": 1630163, "player_name": "LaMelo Ball", "team_id": 1610612766, "team_abbreviation": "CHA", "min": 33.2, "usg_pct": 0.320, "pts": 25.4, "reb": 5.2, "ast": 8.3, "fg3m": 3.5},
-        ]
-        return pd.DataFrame(sample)

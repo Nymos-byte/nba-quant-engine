@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class BetEvaluation:
     """Outcome of Benter ensemble evaluation and Kelly risk gating."""
     game_id: str
-    market: str  # 'moneyline', 'spread', 'total'
+    market: str  # 'moneyline', 'spread', 'total', 'player_prop'
     selection: str  # e.g., 'Boston Celtics', 'Over 226.5'
     odds: float
     model_prob: float
@@ -30,11 +30,12 @@ class BetEvaluation:
     ev_percent: float
     raw_kelly: float
     quarter_kelly: float
-    recommended_stake_fraction: float  # bounded between 0.0100 and 0.0175, or 0.0
+    recommended_stake_fraction: float  # bounded between MIN_KELLY_STAKE and MAX_KELLY_STAKE, or 0.0
     recommended_stake_amount: float
     is_approved: bool
     rejection_reason: Optional[str] = None
     matchup: str = ""
+    min_odds: float = 0.0  # Lowest price at which the bet still clears MIN_EV_PERCENT
 
 
 class BenterEngine:
@@ -49,6 +50,8 @@ class BenterEngine:
         max_kelly_stake: float = config.MAX_KELLY_STAKE,
         min_edge: float = config.MIN_EDGE,
         min_ev_percent: float = config.MIN_EV_PERCENT,
+        max_market_discrepancy: float = config.MAX_MARKET_DISCREPANCY,
+        max_prop_discrepancy: float = config.MAX_PROP_DISCREPANCY,
         bankroll: Optional[float] = None,
     ) -> None:
         if not abs((weight_model + weight_market) - 1.0) < 1e-5:
@@ -60,6 +63,8 @@ class BenterEngine:
         self.max_kelly_stake = max_kelly_stake
         self.min_edge = min_edge
         self.min_ev_percent = min_ev_percent
+        self.max_market_discrepancy = max_market_discrepancy
+        self.max_prop_discrepancy = max_prop_discrepancy
         self.bankroll = bankroll if bankroll is not None else config.get_current_bankroll()
 
     def combine_probabilities(self, p_model: float, p_market_fair: float) -> float:
@@ -117,18 +122,23 @@ class BenterEngine:
         rejection_reason = None
         final_fraction = 0.0
 
-        if edge < self.min_edge:
+        discrepancy = abs(p_model - p_market_fair)
+        max_discrepancy = self.max_prop_discrepancy if market == "player_prop" else self.max_market_discrepancy
+        if discrepancy > max_discrepancy:
+            is_approved = False
+            rejection_reason = f"Model-market discrepancy {discrepancy:.4f} above cap {max_discrepancy:.4f}"
+        elif edge < self.min_edge:
             is_approved = False
             rejection_reason = f"Edge {edge:.4f} below minimum threshold {self.min_edge:.4f}"
         elif ev_pct < self.min_ev_percent:
             is_approved = False
             rejection_reason = f"EV {ev_pct:.2f}% below minimum threshold {self.min_ev_percent:.2f}%"
         elif q_k < self.min_kelly_stake:
-            # Floor rule: if quarter-kelly stake is under 1.0%, discard (0.0)
+            # Floor rule: if quarter-kelly stake is under the floor, discard (0.0)
             is_approved = False
-            rejection_reason = f"Quarter-Kelly stake {q_k:.4f} below floor {self.min_kelly_stake:.4f} (1.00%)"
+            rejection_reason = f"Quarter-Kelly stake {q_k:.4f} below floor {self.min_kelly_stake:.4f}"
         else:
-            # Ceiling rule: truncate to 1.75% if exceeding max
+            # Ceiling rule: truncate if exceeding max
             if q_k > self.max_kelly_stake:
                 final_fraction = self.max_kelly_stake
             else:
@@ -154,6 +164,7 @@ class BenterEngine:
             is_approved=is_approved,
             rejection_reason=rejection_reason,
             matchup=matchup,
+            min_odds=round((1.0 + self.min_ev_percent / 100.0) / p_final, 2) if p_final > 0 else 0.0,
         )
 
 

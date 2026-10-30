@@ -1,3 +1,5 @@
+from functools import partial
+
 import pytest
 from settle_nba import SettlementEngine
 
@@ -260,6 +262,9 @@ def test_run_pipeline_strict_date_filter(tmp_path, monkeypatch):
         def get_league_averages(self, df):
             return {"pace": 100.0, "ortg": 114.0, "drtg": 114.0, "pts": 112.0}
 
+        def get_back_to_back_teams(self, target_date):
+            return set()
+
     monkeypatch.setattr(main, "NBADataCollector", FakeNBACollector)
 
     # Mock OddsCollector with huge +EV on Boston (odds 3.50 when model expects Boston to win easily)
@@ -289,6 +294,8 @@ def test_run_pipeline_strict_date_filter(tmp_path, monkeypatch):
             return fake_games
 
     monkeypatch.setattr(main, "OddsCollector", FakeOddsCollector)
+    # This test is about the date filter: the fixture's model-market gap must not reject the bet
+    monkeypatch.setattr(main, "BenterEngine", partial(main.BenterEngine, max_market_discrepancy=1.0))
 
     # Mock notifier so no Telegram message is sent
     monkeypatch.setattr(main.TelegramNotifier, "send_notification", lambda self, *args, **kwargs: True)
@@ -305,4 +312,85 @@ def test_run_pipeline_strict_date_filter(tmp_path, monkeypatch):
     assert "tomorrow_game" not in game_ids
 
 
+def test_run_pipeline_without_odds_leaves_no_sentinel(tmp_path, monkeypatch):
+    import config
+    import main
+    import pandas as pd
 
+    monkeypatch.setattr(config, "HISTORY_DIR", tmp_path)
+
+    class FakeNBACollector:
+        def get_team_stats(self, **kwargs):
+            return pd.DataFrame()
+
+        def get_player_stats(self, **kwargs):
+            return pd.DataFrame()
+
+        def get_league_averages(self, df):
+            return {"pace": 100.0, "ortg": 114.0, "drtg": 114.0, "pts": 112.0}
+
+    class NoOdds:
+        def get_game_odds(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(main, "NBADataCollector", FakeNBACollector)
+    monkeypatch.setattr(main, "OddsCollector", NoOdds)
+
+    main.run_pipeline(date_str="2026-11-05", bankroll=1000.0)
+    assert not list(tmp_path.iterdir())
+
+
+def test_pipeline_places_and_settles_a_real_line_player_prop(tmp_path, monkeypatch):
+    import config
+    import main
+    import pandas as pd
+
+    monkeypatch.setattr(config, "HISTORY_DIR", tmp_path)
+    monkeypatch.setattr(main.TelegramNotifier, "send_notification", lambda self, *a, **k: True)
+    monkeypatch.setattr(main, "BenterEngine", partial(main.BenterEngine, max_prop_discrepancy=1.0))
+
+    class FakeNBACollector:
+        def get_team_stats(self, **kwargs):
+            return pd.DataFrame([
+                {"team_name": "Boston Celtics", "team_abbreviation": "BOS", "pace": 100.0, "ortg": 114.0, "drtg": 114.0, "pts": 114.0},
+                {"team_name": "Miami Heat", "team_abbreviation": "MIA", "pace": 100.0, "ortg": 114.0, "drtg": 114.0, "pts": 114.0},
+            ])
+
+        def get_player_stats(self, **kwargs):
+            return pd.DataFrame([{"player_name": "Jayson Tatum", "team_abbreviation": "BOS", "gp": 40, "min": 36.0,
+                                  "pts": 40.0, "reb": 8.0, "ast": 5.0, "fg3m": 3.0}])
+
+        def get_league_averages(self, df):
+            return {"pace": 100.0, "ortg": 114.0, "drtg": 114.0, "pts": 114.0}
+
+        def get_back_to_back_teams(self, target_date):
+            return set()
+
+    class FakeOdds:
+        def get_game_odds(self, **kwargs):
+            return [{"game_id": "g", "home_team": "Boston Celtics", "away_team": "Miami Heat",
+                     "commence_time": "2026-11-05T23:00:00Z", "markets": {}}]
+
+        def get_player_props(self, event_ids):
+            return {"g": {"pts": {"jayson tatum": {
+                "name": "Jayson Tatum", "point": 28.5,
+                "Over": {"odds": 1.91, "market_fair_prob": 0.5},
+                "Under": {"odds": 1.91, "market_fair_prob": 0.5},
+            }}}}
+
+    monkeypatch.setattr(main, "NBADataCollector", FakeNBACollector)
+    monkeypatch.setattr(main, "OddsCollector", FakeOdds)
+
+    main.run_pipeline(date_str="2026-11-05", bankroll=1000.0, force=True)
+    row = pd.read_csv(tmp_path / "picks_2026-11-05.csv").iloc[0].to_dict()
+    assert row["market"] == "player_prop"
+    assert row["selection"] == "Jayson Tatum Over 28.5 PTS"
+
+    game = {"pts": 110.0, "opponent_pts": 100.0, "team_name": "x"}
+    scores = {
+        "BOS": game, "Boston Celtics": game, "MIA": game, "Miami Heat": game,
+        "__player_stats__": {"jayson tatum": {"team": "BOS", "pts": 31.0}},
+    }
+    result, pnl = SettlementEngine().settle_single_bet(row, scores)
+    assert result == "WON"
+    assert pnl == round(row["stake_amount"] * (row["odds"] - 1.0), 2)

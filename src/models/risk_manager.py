@@ -18,27 +18,38 @@ logger = logging.getLogger(__name__)
 def deduplicate_picks_by_game(
     picks: List[BetEvaluation],
     max_picks: Optional[int] = config.MAX_DAILY_CORE_BETS,
+    max_props: int = config.MAX_DAILY_PROP_BETS,
 ) -> List[BetEvaluation]:
     """
-    Strict deduplication: exactly 1 bet per game_id.
+    Strict deduplication: at most 1 score-market bet and 1 player prop per game_id.
     Retains the candidate bet with the highest Expected Value (EV%).
     Optionally caps the portfolio to the top `max_picks` highest EV% bets
     to avoid pulverizing the bankroll into micro-stakes.
     """
     approved_picks = [p for p in picks if p.is_approved]
-    grouped: Dict[str, List[BetEvaluation]] = {}
+    grouped: Dict[tuple[str, bool], List[BetEvaluation]] = {}
 
     for pick in approved_picks:
-        grouped.setdefault(pick.game_id, []).append(pick)
+        grouped.setdefault((pick.game_id, pick.market == "player_prop"), []).append(pick)
 
     deduped: List[BetEvaluation] = []
-    for game_id, game_picks in grouped.items():
+    for game_picks in grouped.values():
         # Sort descending by ev_percent
         best_pick = max(game_picks, key=lambda p: p.ev_percent)
         deduped.append(best_pick)
 
     # Sort remaining picks by EV% descending
     deduped.sort(key=lambda p: p.ev_percent, reverse=True)
+
+    props_kept = 0
+    capped: List[BetEvaluation] = []
+    for pick in deduped:
+        if pick.market == "player_prop":
+            if props_kept >= max_props:
+                continue
+            props_kept += 1
+        capped.append(pick)
+    deduped = capped
 
     if max_picks is not None and len(deduped) > max_picks:
         logger.info(

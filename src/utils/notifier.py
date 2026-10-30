@@ -122,7 +122,8 @@ class TelegramNotifier:
             lines.extend([
                 f"🏀 *Partido:* *{partido_str}*",
                 f"🎯 *Mercado / Selección:* {p.market.upper()} ➔ *{p.selection}*",
-                f"📊 *Cuota:* `{p.odds:.2f}` | *P. Justa:* `{p.final_prob*100:.1f}%`",
+                f"📊 *Cuota ref.:* `{p.odds:.2f}` | *P. Justa:* `{p.final_prob*100:.1f}%`",
+                f"🚦 *Apostar en Draftea solo con misma línea y cuota ≥* `{p.min_odds:.2f}`",
                 f"📈 *Edge:* `+{p.edge*100:.2f}%` | *EV:* `+{p.ev_percent:.1f}%`",
                 f"💰 *Stake Quarter-Kelly:* `{p.recommended_stake_fraction*100:.2f}%` (${p.recommended_stake_amount:.2f} MXN)",
                 "─────────────────────────────",
@@ -150,7 +151,7 @@ class TelegramNotifier:
             "🎰 *ACTION PARLAY - DRAFTEA / FUN*",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             f"🎟️ *Ticket ID:* `{parlay.ticket_id}`",
-            f"🔥 *Cuota Total:* `{parlay.combined_odds:.2f}`",
+            f"🔥 *Cuota Total (estimada, no es línea real):* `{parlay.combined_odds:.2f}`",
             f"💵 *Stake Sugerido:* `${parlay.stake_mxn:.2f} MXN` (Fijo)",
             f"🏆 *Retorno Potencial:* `${parlay.potential_payout_mxn:.2f} MXN`",
             f"🧠 *Correlación / Rationale:* _{parlay.correlation_rationale}_",
@@ -167,7 +168,7 @@ class TelegramNotifier:
         lines.extend([
             "─────────────────────────────",
             f"💳 *Presupuesto Semanal:* `${current_spend:.2f} / ${config.WEEKLY_FUN_BUDGET:.2f} MXN` gastado.",
-            "⚠️ *Regla:* Módulo satélite recreativo con riesgo estrictamente acotado.\n",
+            "⚠️ *Regla:* Módulo satélite recreativo, fuera del bankroll Core.\n",
         ])
         return "\n".join(lines)
 
@@ -276,7 +277,7 @@ class TelegramNotifier:
             s_sym = "🟢 +" if s_pnl >= 0 else "🔴 -"
 
             lines.extend([
-                "🎰 *SOÑADORA (Draftea / Parlay):*",
+                "🎰 *SOÑADORA (Draftea / Parlay, cuotas estimadas, fuera del bankroll):*",
                 f"• Récord: `{s_won}W - {s_lost}L - {s_push}P` ({s_wr:.1f}%)",
                 f"• PnL: *{s_sym}${abs(s_pnl):.2f} MXN*",
                 f"• ROI: *{s_roi:+.2f}%*",
@@ -357,6 +358,13 @@ class TelegramNotifier:
                     f"• Récord: `{hc_won}W - {hc_lost}L - {hc_push}P` ({hc_wr:.1f}%)",
                     f"• PnL: *{hc_sym}${abs(hc_pnl):.2f} MXN* | ROI: *{hc_roi:+.2f}%*",
                 ])
+                for market, m in sorted(h_core.get("by_market", {}).items()):
+                    m_roi = (m["pnl"] / m["staked"] * 100.0) if m["staked"] > 0 else 0.0
+                    lines.append(f"• {market}: `{m['won']}W - {m['lost']}L` | ROI: *{m_roi:+.2f}%*")
+                if h_core.get("brier_model") is not None:
+                    lines.append(f"• Brier: modelo `{h_core['brier_model']:.3f}` vs mercado `{h_core['brier_market']:.3f}`")
+                if h_core.get("clv_avg") is not None:
+                    lines.append(f"• CLV medio: `{h_core['clv_avg']:+.2f}%` ({h_core['clv_n']} apuestas)")
 
             if h_sat and (h_sat.get("won", 0) + h_sat.get("lost", 0) + h_sat.get("push", 0) > 0):
                 hs_won = h_sat.get("won", 0)
@@ -368,7 +376,7 @@ class TelegramNotifier:
                 hs_sym = "🟢 +" if hs_pnl >= 0 else "🔴 -"
 
                 lines.extend([
-                    "🎰 *Soñadora Acumulado:*",
+                    "🎰 *Soñadora Acumulado (cuotas estimadas, fuera del bankroll):*",
                     f"• Récord: `{hs_won}W - {hs_lost}L - {hs_push}P` ({hs_wr:.1f}%)",
                     f"• PnL: *{hs_sym}${abs(hs_pnl):.2f} MXN* | ROI: *{hs_roi:+.2f}%*",
                 ])

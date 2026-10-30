@@ -7,7 +7,7 @@ conditioned on projected game pace.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Literal, Optional
 
 import numpy as np
@@ -62,8 +62,8 @@ class PlayerPropsModel:
 
         if category == "pts":
             dist_type = "normal"
-            # Empirical NBA variance for points: ~28-32% CV (coefficient of variation)
-            std_dev = max(3.5, adj_mean * 0.28)
+            # Observed CV of player points in 2026-27 box scores: 0.36
+            std_dev = max(3.5, adj_mean * 0.36)
         elif category in ("ast", "reb"):
             dist_type = "poisson"
             std_dev = float(np.sqrt(max(0.1, adj_mean)))
@@ -84,6 +84,28 @@ class PlayerPropsModel:
             std_dev=round(std_dev, 2),
             distribution_type=dist_type,
         )
+
+    @staticmethod
+    def shrink_to_market(season_mean: float, market_mean: float, games: int, prior_games: float) -> float:
+        """Treats the market as prior_games of evidence, so few games can't create a large fake edge."""
+        return (games * season_mean + prior_games * market_mean) / (games + prior_games)
+
+    def market_implied_mean(self, category: PropCategory, line: float, fair_over: float) -> float:
+        """
+        Mean at which this model's distribution reproduces the market's P(over).
+        The line itself is not that mean: at 1.5 assists with a favored Over, the implied mean is well above 1.5.
+        """
+        low, high = 0.01, max(5.0, line * 3.0)
+        for _ in range(50):
+            mid = (low + high) / 2.0
+            dist = self.fit_distribution("", "", category, mid, 100.0, 100.0)
+            # Work from the unrounded mean: rounding would stall the search on low counts
+            dist = replace(dist, adjusted_mean=mid)
+            if self.calculate_over_prob(dist, line) < fair_over:
+                low = mid
+            else:
+                high = mid
+        return (low + high) / 2.0
 
     def calculate_over_prob(self, dist: PropDistribution, line: float) -> float:
         """

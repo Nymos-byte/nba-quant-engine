@@ -39,11 +39,13 @@ class RatingEngine:
         home_court_advantage: float = config.HOME_COURT_ADVANTAGE,
         mc_simulations: int = config.MC_SIMULATIONS,
         dispersion: float = config.MC_POINT_DISPERSION,
+        correlation: float = config.MC_SCORE_CORRELATION,
         random_seed: Optional[int] = 42,
     ) -> None:
         self.home_court_advantage: float = home_court_advantage
         self.mc_simulations: int = mc_simulations
         self.dispersion: float = dispersion
+        self.correlation: float = correlation
         self.random_seed: Optional[int] = random_seed
 
     def calculate_expected_pace(
@@ -98,18 +100,18 @@ class RatingEngine:
         away_pts: float,
         spread_lines: Optional[list[float]] = None,
         total_lines: Optional[list[float]] = None,
+        expected_pace: float = 100.0,
     ) -> SimulationResult:
         """
         Runs Monte Carlo simulation (10,000 iterations) with bivariate normal
-        dispersion (sigma ~ 10.5).
+        dispersion and correlated team scores.
         """
         if self.random_seed is not None:
             rng = np.random.default_rng(self.random_seed)
         else:
             rng = np.random.default_rng()
 
-        # Simulate independent score variations with weak correlation (rho ~ 0.12)
-        rho = 0.12
+        rho = self.correlation
         cov = np.array([
             [self.dispersion ** 2, rho * (self.dispersion ** 2)],
             [rho * (self.dispersion ** 2), self.dispersion ** 2],
@@ -148,7 +150,7 @@ class RatingEngine:
         return SimulationResult(
             home_expected_points=round(float(home_pts), 2),
             away_expected_points=round(float(away_pts), 2),
-            expected_pace=round(float((home_pts + away_pts) / 2.2), 2),
+            expected_pace=round(float(expected_pace), 2),
             expected_total=round(float(home_pts + away_pts), 2),
             expected_spread=round(float(home_pts - away_pts), 2),
             home_win_prob=round(float(home_win_prob), 4),
@@ -169,7 +171,10 @@ class RatingEngine:
         home_pace = float(home_stats.get("pace", 100.0))
         away_pace = float(away_stats.get("pace", 100.0))
         league_pace = float(league_averages.get("pace", 99.5))
-        league_ortg = float(league_averages.get("ortg", 114.5))
+        # One league efficiency for both sides: a gap between mean ORtg and DRtg would bias every total
+        league_ortg = (
+            float(league_averages.get("ortg", 114.5)) + float(league_averages.get("drtg", league_averages.get("ortg", 114.5)))
+        ) / 2.0
 
         exp_pace = self.calculate_expected_pace(home_pace, away_pace, league_pace)
         home_pts, away_pts = self.project_team_points(
@@ -189,6 +194,7 @@ class RatingEngine:
             away_pts=away_pts,
             spread_lines=spread_lines,
             total_lines=total_lines,
+            expected_pace=exp_pace,
         )
         return res
 
