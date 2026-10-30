@@ -56,8 +56,8 @@ Problemas, por prioridad:
 Menores: `LA Clippers` no coincide con `Los Angeles Clippers` (usa valores genéricos); spreads solo del local; desviación de totales 15.7 frente a 19.9 real; `expected_pace = (h+a)/2.2`; cuotas por defecto de región `us`, no de casas mexicanas.
 
 ## Estado del plan (v2)
-Implementado en código; las líneas de la auditoría de arriba describen la v1.
-1. Archivo: `python scripts/archive_sample.py v1`. Ejecutarlo al desplegar, porque el workflow sigue escribiendo en `main` hasta entonces.
+Desplegado el 30 oct 2026: la v1 está archivada en `data/history/archive/v1/` y la muestra v2 empieza con $1,000. Las líneas de la auditoría de arriba describen la v1.
+1. Archivo: `python scripts/archive_sample.py <version>` al cambiar de versión.
 2. Liquidación: una pata solo gana verificada; jugador ausente con su box score presente anula (PUSH); box score ausente deja PENDING. El bankroll aplica solo el PnL Core aún no aplicado.
 3. Satellite fuera del bankroll, con cuotas marcadas como estimadas. Las líneas reales siguen pendientes.
 4. Ratings y jugadores en `src/data/season_stats.py`, con almacén por fecha `data/cache/season_boxscores_2026_27.json`. Mezcla con referencia (`RATING_PRIOR_GAMES`) y resta por bajas (`INJURY_REPLACEMENT_RATE`): ambos parámetros son supuestos sin calibrar. Sin descansos todavía.
