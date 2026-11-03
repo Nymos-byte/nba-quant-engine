@@ -153,17 +153,19 @@ class OddsCollector:
             logger.warning("Could not read Odds API quota: %s", type(e).__name__)
             return None
 
-    def get_commence_time(self, event_id: str) -> Optional[str]:
-        """Tip-off time from the events endpoint, which does not consume credits."""
+    def get_event_times(self) -> Optional[Dict[str, str]]:
+        """Tip-off time of every upcoming event, from the endpoint that does not consume credits."""
         try:
             res = requests.get(f"{self.base_url}/events", params={"apiKey": self.api_key}, timeout=10)
             res.raise_for_status()
-            for event in res.json():
-                if event.get("id") == event_id:
-                    return event.get("commence_time")
+            return {str(e.get("id")): str(e.get("commence_time")) for e in res.json()}
         except Exception as e:
             logger.warning("Could not read event schedule: %s", type(e).__name__)
-        return None
+            return None
+
+    def get_commence_time(self, event_id: str) -> Optional[str]:
+        """Tip-off time of one event, without consuming credits."""
+        return (self.get_event_times() or {}).get(event_id)
 
     def get_player_props(
         self,

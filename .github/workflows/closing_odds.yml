@@ -4,11 +4,8 @@ on:
   workflow_dispatch:
   repository_dispatch: # Webhook POST de cron-job.org, igual que el pipeline diario
     types: [capture-closing]
-  # 17:30 y 19:30 CDMX. El cron de GitHub puede retrasarse; una corrida tardía no altera nada
-  # porque solo se actualizan partidos que aún no empiezan. Dos capturas por el límite de créditos.
-  schedule:
-    - cron: '30 23 * * *'
-    - cron: '30 1 * * *'
+  # Solo manual: la captura diaria la hace el job closing-odds de daily_pipeline.yml.
+  # El cron de GitHub llegaba con 2 a 6 horas de retraso, ya con los partidos empezados.
 
 permissions:
   contents: write

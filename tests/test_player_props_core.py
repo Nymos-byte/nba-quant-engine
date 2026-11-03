@@ -133,6 +133,9 @@ def test_score_markets_do_not_spend_credits_on_props_in_closing_capture():
             self.markets = markets
             return []
 
+        def get_event_times(self):
+            return {"g": "2099-01-01T00:00:00Z"}
+
     import tempfile
     from pathlib import Path
     from capture_closing import run
@@ -252,3 +255,23 @@ def test_closing_capture_handles_player_props():
     assert updated == 1
     assert out.loc[0, "clv_percent"] == 0.0
     assert out.loc[0, "closing_point"] == 30.5
+
+
+def test_closing_capture_spends_no_credits_once_games_started(tmp_path):
+    class LateRun:
+        def get_event_times(self):
+            return {"g": "2000-01-01T00:00:00Z"}
+
+        def get_game_odds(self, **kwargs):
+            raise AssertionError("paid odds call after tip-off")
+
+        def get_player_props(self, *args, **kwargs):
+            raise AssertionError("paid props call after tip-off")
+
+    from capture_closing import run
+    day = datetime.now(config.TZ_INFO).strftime("%Y-%m-%d")
+    pd.DataFrame([
+        {"date": day, "game_id": "g", "bet_type": "CORE_STRAIGHT", "status": "PENDING", "market": "moneyline", "selection": "A ML", "odds": 2.0},
+        {"date": day, "game_id": "g", "bet_type": "CORE_STRAIGHT", "status": "PENDING", "market": "player_prop", "selection": "P Over 1.5 AST", "odds": 2.0},
+    ]).to_csv(tmp_path / f"picks_{day}.csv", index=False)
+    assert run(history_dir=tmp_path, collector=LateRun()) == 0

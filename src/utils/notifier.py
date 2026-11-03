@@ -218,6 +218,27 @@ class TelegramNotifier:
 
         return self._send_text(message_text)
 
+    @staticmethod
+    def _format_position(row: dict) -> str:
+        res = row.get("result", "PENDING")
+        pnl_val = float(row.get("pnl", 0.0))
+        icon = "✅" if res == "WON" else ("❌" if res == "LOST" else "⚪")
+        pnl_str = f"+${pnl_val:.2f} MXN" if pnl_val > 0 else (f"-${abs(pnl_val):.2f} MXN" if pnl_val < 0 else "$0.00 MXN")
+        return f"  {icon} *{row.get('selection', '')}*: `{pnl_str}` ({res})"
+
+    @staticmethod
+    def _record_lines(stats: dict) -> List[str]:
+        pnl = stats.get("total_pnl", 0.0)
+        sym = "🟢 +" if pnl >= 0 else "🔴 -"
+        return [
+            f"• Récord: `{stats.get('won', 0)}W - {stats.get('lost', 0)}L - {stats.get('push', 0)}P` ({stats.get('winrate', 0.0):.1f}%)",
+            f"• PnL: *{sym}${abs(pnl):.2f} MXN* | ROI: *{stats.get('roi_percent', 0.0):+.2f}%*",
+        ]
+
+    @staticmethod
+    def _has_bets(stats: Optional[dict]) -> bool:
+        return bool(stats) and stats.get("won", 0) + stats.get("lost", 0) + stats.get("push", 0) > 0
+
     def send_settlement_report(
         self,
         target_date: str,
@@ -226,138 +247,23 @@ class TelegramNotifier:
         historical_stats: Optional[dict] = None,
         is_preseason: bool = False,
     ) -> bool:
-        """Formats and transmits the daily settlement report via Telegram, separating Core from Satellite bets."""
-        won = summary.get("won", 0)
-        lost = summary.get("lost", 0)
-        push = summary.get("push", 0)
-        total_pnl = summary.get("total_pnl", 0.0)
-        roi = summary.get("roi_percent", 0.0)
-        winrate = (won / (won + lost) * 100.0) if (won + lost) > 0 else 0.0
+        """Sends one settlement message for Core and a separate one for Soñadora: their results never mix."""
+        historical_stats = historical_stats or {}
+        season_lbl = historical_stats.get("season_type", "Pretemporada" if is_preseason else "Temporada Regular")
+        banner = "⚠️ *[CALIBRACIÓN PRETEMPORADA - RESULTADOS DE PRUEBA]* ⚠️\n" if is_preseason else ""
 
-        pnl_symbol = "🟢 +" if total_pnl >= 0 else "🔴 -"
+        sat_rows = [r for r in settled_rows if self._is_satellite_row(r)]
+        core_rows = [r for r in settled_rows if not self._is_satellite_row(r)]
+        messages: List[str] = []
 
-        lines = []
-        if is_preseason:
-            lines.append("⚠️ *[CALIBRACIÓN PRETEMPORADA - RESULTADOS DE PRUEBA]* ⚠️\n")
-
-        lines.extend([
-            "📊 *NBA QUANT ENGINE - LIQUIDACIÓN DE RESULTADOS*",
-            f"📅 *Fecha:* `{target_date}`",
-            "─────────────────────────────",
-        ])
-
-        # Separate Core Quant vs Soñadora Draftea in Daily Summary
-        core = summary.get("core")
-        sat = summary.get("satellite")
-
-        if core and (core.get("won", 0) + core.get("lost", 0) + core.get("push", 0) > 0):
-            c_won = core.get("won", 0)
-            c_lost = core.get("lost", 0)
-            c_push = core.get("push", 0)
-            c_pnl = core.get("total_pnl", 0.0)
-            c_roi = core.get("roi_percent", 0.0)
-            c_wr = core.get("winrate", 0.0)
-            c_sym = "🟢 +" if c_pnl >= 0 else "🔴 -"
-
-            lines.extend([
-                "🟢 *CORE QUANT (Benter + Kelly):*",
-                f"• Récord: `{c_won}W - {c_lost}L - {c_push}P` ({c_wr:.1f}%)",
-                f"• PnL: *{c_sym}${abs(c_pnl):.2f} MXN*",
-                f"• ROI: *{c_roi:+.2f}%*",
-                "─────────────────────────────",
-            ])
-
-        if sat and (sat.get("won", 0) + sat.get("lost", 0) + sat.get("push", 0) > 0):
-            s_won = sat.get("won", 0)
-            s_lost = sat.get("lost", 0)
-            s_push = sat.get("push", 0)
-            s_pnl = sat.get("total_pnl", 0.0)
-            s_roi = sat.get("roi_percent", 0.0)
-            s_wr = sat.get("winrate", 0.0)
-            s_sym = "🟢 +" if s_pnl >= 0 else "🔴 -"
-
-            lines.extend([
-                "🎰 *SOÑADORA (Draftea / Parlay, cuotas estimadas, fuera del bankroll):*",
-                f"• Récord: `{s_won}W - {s_lost}L - {s_push}P` ({s_wr:.1f}%)",
-                f"• PnL: *{s_sym}${abs(s_pnl):.2f} MXN*",
-                f"• ROI: *{s_roi:+.2f}%*",
-                "─────────────────────────────",
-            ])
-
-        lines.extend([
-            "⚖️ *BALANCE TOTAL DEL DÍA:*",
-            f"• Récord Global: `{won}W - {lost}L - {push}P` ({winrate:.1f}%)",
-            f"• PnL Neto: *{pnl_symbol}${abs(total_pnl):.2f} MXN*",
-            f"• ROI del Día: *{roi:+.2f}%*",
-            "─────────────────────────────",
-            "*Detalle de Posiciones:*",
-        ])
-
-        # Separate positions into Core and Soñadora in detail list
-        core_rows = [
-            r for r in settled_rows
-            if not (
-                str(r.get("bet_type", "")).upper() == "SATELLITE_PARLAY"
-                or str(r.get("market", "")).lower() == "player_props_parlay"
-                or "PARLAY" in str(r.get("selection", "")).upper()
-            )
-        ]
-        sat_rows = [
-            r for r in settled_rows
-            if (
-                str(r.get("bet_type", "")).upper() == "SATELLITE_PARLAY"
-                or str(r.get("market", "")).lower() == "player_props_parlay"
-                or "PARLAY" in str(r.get("selection", "")).upper()
-            )
-        ]
-
-        def _format_pos(row: dict) -> str:
-            res = row.get("result", "PENDING")
-            sel = row.get("selection", "")
-            pnl_val = float(row.get("pnl", 0.0))
-            curr = "MXN"
-            icon = "✅" if res == "WON" else ("❌" if res == "LOST" else "⚪")
-            pnl_str = f"+${pnl_val:.2f} {curr}" if pnl_val > 0 else (f"-${abs(pnl_val):.2f} {curr}" if pnl_val < 0 else f"$0.00 {curr}")
-            return f"  {icon} *{sel}*: `{pnl_str}` ({res})"
-
-        if core_rows:
-            lines.append("🟢 _Core Quant:_")
-            for r in core_rows:
-                lines.append(_format_pos(r))
-
-        if sat_rows:
-            lines.append("🎰 _Soñadora Draftea:_")
-            for r in sat_rows:
-                lines.append(_format_pos(r))
-
-        if not core_rows and not sat_rows:
-            for r in settled_rows:
-                lines.append(_format_pos(r))
-
-        if historical_stats:
-            season_lbl = historical_stats.get("season_type", "Pretemporada" if is_preseason else "Temporada Regular")
-            lines.extend([
-                "─────────────────────────────",
-                f"🏦 *Métricas Históricas ({season_lbl}):*",
-            ])
-
-            h_core = historical_stats.get("core")
-            h_sat = historical_stats.get("satellite")
-
-            if h_core and (h_core.get("won", 0) + h_core.get("lost", 0) + h_core.get("push", 0) > 0):
-                hc_won = h_core.get("won", 0)
-                hc_lost = h_core.get("lost", 0)
-                hc_push = h_core.get("push", 0)
-                hc_pnl = h_core.get("total_pnl", 0.0)
-                hc_roi = h_core.get("roi_percent", 0.0)
-                hc_wr = h_core.get("winrate", 0.0)
-                hc_sym = "🟢 +" if hc_pnl >= 0 else "🔴 -"
-
-                lines.extend([
-                    "🟢 *Core Quant Acumulado:*",
-                    f"• Récord: `{hc_won}W - {hc_lost}L - {hc_push}P` ({hc_wr:.1f}%)",
-                    f"• PnL: *{hc_sym}${abs(hc_pnl):.2f} MXN* | ROI: *{hc_roi:+.2f}%*",
-                ])
+        core, h_core = summary.get("core"), historical_stats.get("core")
+        if core_rows or self._has_bets(h_core):
+            lines = [banner + "🟢 *CORE QUANT - LIQUIDACIÓN*", f"📅 *Fecha:* `{target_date}`", "─────────────────────────────"]
+            if self._has_bets(core):
+                lines.extend(["*Del día:*", *self._record_lines(core)])
+            lines.extend(self._format_position(r) for r in core_rows)
+            if self._has_bets(h_core):
+                lines.extend(["─────────────────────────────", f"🏦 *Core Quant Acumulado ({season_lbl}):*", *self._record_lines(h_core)])
                 for market, m in sorted(h_core.get("by_market", {}).items()):
                     m_roi = (m["pnl"] / m["staked"] * 100.0) if m["staked"] > 0 else 0.0
                     lines.append(f"• {market}: `{m['won']}W - {m['lost']}L` | ROI: *{m_roi:+.2f}%*")
@@ -365,48 +271,39 @@ class TelegramNotifier:
                     lines.append(f"• Brier: modelo `{h_core['brier_model']:.3f}` vs mercado `{h_core['brier_market']:.3f}`")
                 if h_core.get("clv_avg") is not None:
                     lines.append(f"• CLV medio: `{h_core['clv_avg']:+.2f}%` ({h_core['clv_n']} apuestas)")
+            messages.append("\n".join(lines))
 
-            if h_sat and (h_sat.get("won", 0) + h_sat.get("lost", 0) + h_sat.get("push", 0) > 0):
-                hs_won = h_sat.get("won", 0)
-                hs_lost = h_sat.get("lost", 0)
-                hs_push = h_sat.get("push", 0)
-                hs_pnl = h_sat.get("total_pnl", 0.0)
-                hs_roi = h_sat.get("roi_percent", 0.0)
-                hs_wr = h_sat.get("winrate", 0.0)
-                hs_sym = "🟢 +" if hs_pnl >= 0 else "🔴 -"
+        sat, h_sat = summary.get("satellite"), historical_stats.get("satellite")
+        if sat_rows or self._has_bets(h_sat):
+            lines = [
+                banner + "🎰 *SOÑADORA - LIQUIDACIÓN*",
+                f"📅 *Fecha:* `{target_date}`",
+                "_Cuotas estimadas, fuera del bankroll Core._",
+                "─────────────────────────────",
+            ]
+            if self._has_bets(sat):
+                lines.extend(["*Del día:*", *self._record_lines(sat)])
+            lines.extend(self._format_position(r) for r in sat_rows)
+            if self._has_bets(h_sat):
+                lines.extend(["─────────────────────────────", f"🏦 *Soñadora Acumulado ({season_lbl}):*", *self._record_lines(h_sat)])
+            messages.append("\n".join(lines))
 
-                lines.extend([
-                    "🎰 *Soñadora Acumulado (cuotas estimadas, fuera del bankroll):*",
-                    f"• Récord: `{hs_won}W - {hs_lost}L - {hs_push}P` ({hs_wr:.1f}%)",
-                    f"• PnL: *{hs_sym}${abs(hs_pnl):.2f} MXN* | ROI: *{hs_roi:+.2f}%*",
-                ])
+        all_sent = True
+        for message_text in messages:
+            clean_text = message_text.replace("*", "").replace("`", "").replace("_", "")
+            try:
+                if hasattr(sys.stdout, "reconfigure"):
+                    sys.stdout.reconfigure(encoding="utf-8")
+                print(clean_text + "\n")
+            except Exception:
+                print(clean_text.encode("ascii", errors="replace").decode("ascii"))
+            all_sent = self._send_text(message_text) and all_sent
+        return all_sent
 
-            h_won = historical_stats.get("won", 0)
-            h_lost = historical_stats.get("lost", 0)
-            h_push = historical_stats.get("push", 0)
-            h_pnl = historical_stats.get("total_pnl", 0.0)
-            h_roi = historical_stats.get("roi_percent", 0.0)
-            h_wr = (h_won / (h_won + h_lost) * 100.0) if (h_won + h_lost) > 0 else 0.0
-            h_symbol = "🟢 +" if h_pnl >= 0 else "🔴 -"
-
-            lines.extend([
-                "⚖️ *Balance Global Acumulado:*",
-                f"• Récord Total: `{h_won}W - {h_lost}L - {h_push}P` ({h_wr:.1f}%)",
-                f"• PnL Neto: *{h_symbol}${abs(h_pnl):.2f} MXN* | ROI: *{h_roi:+.2f}%*",
-            ])
-
-        lines.append("─────────────────────────────")
-        lines.append("🤖 _Liquidación automatizada vía settle_nba.py_\n")
-
-        message_text = "\n".join(lines)
-
-        # Print to console
-        clean_text = message_text.replace("*", "").replace("`", "").replace("_", "")
-        try:
-            if hasattr(sys.stdout, "reconfigure"):
-                sys.stdout.reconfigure(encoding="utf-8")
-            print(clean_text)
-        except Exception:
-            print(clean_text.encode("ascii", errors="replace").decode("ascii"))
-
-        return self._send_text(message_text)
+    @staticmethod
+    def _is_satellite_row(row: dict) -> bool:
+        return (
+            str(row.get("bet_type", "")).upper() == "SATELLITE_PARLAY"
+            or str(row.get("market", "")).lower() == "player_props_parlay"
+            or "PARLAY" in str(row.get("selection", "")).upper()
+        )

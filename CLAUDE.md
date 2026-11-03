@@ -31,13 +31,14 @@ La pretemporada fueron pruebas: ignorar `data/history/preseason_apuestas.csv` en
 | `src/models/risk_manager.py` | 1 apuesta por partido, máximo 6 al día, exposición ≤10% |
 | `src/models/player_props.py`, `parlay_builder.py` | Patas y boletos del Satellite |
 | `src/utils/notifier.py` | Telegram |
-| `.github/workflows/daily_pipeline.yml` | Una sola corrida a las 11:00 CDMX (vía cron-job.org): pruebas → liquidar → picks → commit |
+| `.github/workflows/daily_pipeline.yml` | Una sola corrida a las 11:00 CDMX (vía cron-job.org): pruebas → liquidar → picks → commit (también si fallan los picks) → espera → cierre |
 | `capture_closing.py`, `.github/workflows/closing_odds.yml` | Cuota de cierre y CLV de los picks pendientes del día |
 | `scripts/archive_sample.py` | Archiva la muestra de una versión y reinicia el bankroll |
 
 Historial: `data/history/picks_YYYY-MM-DD.csv`, maestro `todas_las_apuestas.csv`, centinelas `*.done`.
 
 ## Convenciones
+- Stakes en pesos enteros, mínimo $5 (reglas de Draftea). Telegram manda Core y Soñadora en mensajes separados, sin totales combinados.
 - Python con type hints, `dataclass(frozen=True)`, `logging`, parámetros en `config.py`.
 - Commits convencionales: `fix(scope): ...`. Commit y push solo si se piden.
 - Toda corrección de lógica de dinero lleva una prueba que falle antes del arreglo (`tests/test_money_logic.py`).
@@ -62,7 +63,7 @@ Desplegado el 30 oct 2026: la v1 está archivada en `data/history/archive/v1/` y
 3. Satellite fuera del bankroll, con cuotas marcadas como estimadas. Las líneas reales siguen pendientes.
 4. Ratings y jugadores en `src/data/season_stats.py`, con almacén por fecha `data/cache/season_boxscores_2026_27.json`. Mezcla con referencia (`RATING_PRIOR_GAMES`) y resta por bajas (`INJURY_REPLACEMENT_RATE`): ambos parámetros son supuestos sin calibrar. Sin descansos todavía.
 5. Filtro: `MAX_MARKET_DISCREPANCY` 10 puntos, con `MIN_EDGE`, `MIN_EV_PERCENT` y `MIN_KELLY_STAKE` bajados para que sea alcanzable. Con cuota 1.91 solo pasan discrepancias de unos 9.7 a 10 puntos: esperar poco volumen y calibrar con datos.
-6. CLV: `capture_closing.py` y `.github/workflows/closing_odds.yml`. Gasta créditos de The Odds API en cada captura con picks pendientes.
+6. CLV: el job `closing-odds` de `daily_pipeline.yml` espera dentro de la misma corrida hasta las 17:40 CDMX y ejecuta `capture_closing.py`. Antes de gastar créditos comprueba gratis si los partidos ya empezaron. Los partidos que empiezan antes no tienen cierre. El cron de GitHub llegaba con 2 a 6 horas de retraso (sin CLV del 31 oct y el 1 nov); `closing_odds.yml` queda solo manual.
 
 Sin cuotas reales o sin partidos de la temporada, `main.py` no genera picks: el mercado sintético se eliminó.
 

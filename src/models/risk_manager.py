@@ -6,6 +6,7 @@ Enforces hard single-game constraints, daily selection limits, and bankroll safe
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import replace
 from typing import Dict, List, Optional
 
@@ -72,6 +73,7 @@ def rescale_daily_exposure(
     1. Sums stakes of all approved picks. If the sum exceeds max_daily_exposure (10.0%),
        applies proportional scaling factor S = max_daily_exposure / sum(stakes).
     2. Enforces min_bet_amount ($5.00 MXN) so no position falls below sportsbook minimums.
+    3. Rounds down to whole pesos: Draftea does not accept cents, and rounding down never breaks the exposure cap.
     """
     if not picks:
         return []
@@ -91,14 +93,14 @@ def rescale_daily_exposure(
     rescaled_picks: List[BetEvaluation] = []
     for p in picks:
         new_fraction = round(p.recommended_stake_fraction * scaling_factor, 6)
-        raw_amount = round(new_fraction * active_bankroll, 2)
+        raw_amount = float(math.floor(new_fraction * active_bankroll + 1e-9))
 
         # Enforce Draftea / Mexican book minimum bet ($5.00 MXN) if bankroll permits
         if raw_amount < min_bet_amount and active_bankroll >= min_bet_amount:
-            new_amount = float(min_bet_amount)
-            new_fraction = round(new_amount / active_bankroll, 6)
+            new_amount = float(math.ceil(min_bet_amount))
         else:
             new_amount = raw_amount
+        new_fraction = round(new_amount / active_bankroll, 6) if active_bankroll > 0 else 0.0
 
         rescaled = replace(
             p,

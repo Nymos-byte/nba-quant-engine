@@ -52,6 +52,7 @@ jobs:
           python settle_nba.py
 
       - name: 🎯 Escanear valor (+EV) y generar picks para hoy (Core & Parlay Draftea)
+        timeout-minutes: 15
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           ODDS_API_REGION: ${{ secrets.ODDS_API_REGION || 'us' }}
@@ -59,10 +60,14 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           BANKROLL_CORE: ${{ secrets.BANKROLL_CORE || '1000.0' }}
           WEEKLY_FUN_BUDGET: ${{ secrets.WEEKLY_FUN_BUDGET || '150.0' }}
+          PYTHONFAULTHANDLER: '1'
+        # Si se traba (como el 2 nov), a los 8 minutos SIGABRT imprime en el log la línea exacta donde quedó
         run: |
-          python main.py
+          timeout -s ABRT 480 python main.py
 
       - name: 💾 Guardar y hacer push del historial actualizado
+        # También si fallan los picks: la liquidación ya hecha no se pierde
+        if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
@@ -71,6 +76,56 @@ jobs:
             echo "No hay cambios en el historial para commitear."
           else
             git commit -m "chore(history): actualizar picks y liquidaciones diarias [skip ci]"
+            git pull --rebase origin main
+            git push origin main
+          fi
+
+  # Misma corrida, sin otro cron-job: espera hasta poco antes de los partidos de la tarde y
+  # guarda la cuota de cierre. Un repositorio público no paga los minutos de espera.
+  closing-odds:
+    needs: run-pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: ⏳ Esperar hasta las 17:40 CDMX
+        run: |
+          target=$(TZ=America/Mexico_City date -d "17:40" +%s)
+          wait=$(( target - $(date +%s) ))
+          max_wait=$(( 330 * 60 ))
+          if [ "$wait" -gt "$max_wait" ]; then wait=$max_wait; fi
+          if [ "$wait" -gt 0 ]; then echo "Esperando $wait s"; sleep "$wait"; fi
+
+      - name: 📥 Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 📉 Guardar cuota de cierre
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_REGION: ${{ secrets.ODDS_API_REGION || 'us' }}
+        run: |
+          python capture_closing.py
+
+      - name: 💾 Guardar y hacer push del historial actualizado
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/history/
+          if git diff --staged --quiet; then
+            echo "No hay cambios en el historial para commitear."
+          else
+            git commit -m "chore(history): actualizar cuotas de cierre [skip ci]"
             git pull --rebase origin main
             git push origin main
           fi

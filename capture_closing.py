@@ -95,8 +95,23 @@ def run(history_dir: Optional[Path] = None, collector: Optional[OddsCollector] =
     if not has_pending:
         return 0
 
+    odds = collector or OddsCollector()
+
     # Solo se piden los mercados con apuestas pendientes: cada uno cuesta créditos
     pending = df[(df["status"] == "PENDING") & (df["bet_type"] == "CORE_STRAIGHT")]
+
+    # Una captura tardía no puede dar cierre: se comprueba con el endpoint gratuito antes de gastar
+    event_times = odds.get_event_times()
+    if event_times is not None:
+        now_utc = datetime.now(timezone.utc)
+        not_started = pending["game_id"].map(
+            lambda g: g in event_times and datetime.fromisoformat(event_times[g].replace("Z", "+00:00")) > now_utc
+        )
+        pending = pending[not_started.astype(bool)]
+        if pending.empty:
+            logger.info("Todos los partidos con apuestas ya empezaron: sin captura de cierre.")
+            return 0
+
     score_markets = [
         api for bet, api in (("moneyline", "h2h"), ("spread", "spreads"), ("total", "totals"))
         if (pending["market"] == bet).any()
@@ -105,7 +120,6 @@ def run(history_dir: Optional[Path] = None, collector: Optional[OddsCollector] =
     if not score_markets and pending_props.empty:
         return 0
 
-    odds = collector or OddsCollector()
     games = odds.get_game_odds(markets=",".join(score_markets), force_refresh=True) if score_markets else []
     if score_markets and not games:
         logger.warning("Sin cuotas en vivo: no se actualiza el cierre.")

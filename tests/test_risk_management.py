@@ -162,15 +162,14 @@ def test_proportional_daily_exposure_rescaling():
     rescaled = rescale_daily_exposure(picks, max_daily_exposure=0.100, bankroll=1000.0)
 
     rescaled_total = sum(p.recommended_stake_fraction for p in rescaled)
-    # Total must now be <= 10.0% (within roundoff precision)
+    # Total must now be <= 10.0%, never above it after rounding
     assert rescaled_total <= 0.100001
-    assert pytest.approx(rescaled_total, abs=1e-4) == 0.100
+    assert rescaled_total > 0.095
 
-    # Each pick should have scaled by 0.10 / 0.14 = 0.714285
-    expected_fraction = 0.0175 * (0.100 / 0.14)
+    # Each pick scales by 0.10 / 0.14 = $12.50, rounded down to whole pesos for Draftea
     for p in rescaled:
-        assert pytest.approx(p.recommended_stake_fraction, abs=1e-4) == expected_fraction
-        assert pytest.approx(p.recommended_stake_amount, abs=0.1) == round(expected_fraction * 1000.0, 2)
+        assert p.recommended_stake_amount == 12.0
+        assert pytest.approx(p.recommended_stake_fraction, abs=1e-6) == 0.012
 
 
 def test_set_bankroll_cli(tmp_path, monkeypatch, capsys):
@@ -336,3 +335,16 @@ def test_settle_syncs_bankroll(tmp_path, monkeypatch):
     updated_b = config.get_current_bankroll(state_file=test_state_file)
     assert pytest.approx(updated_b, abs=0.01) == 1000.0 + expected_pnl
 
+
+@pytest.mark.parametrize("fraction,expected", [(0.0068, 6.0), (0.0034, 5.0), (0.0175, 17.0)])
+def test_stakes_are_whole_pesos_with_draftea_minimum(fraction, expected):
+    from src.models.risk_manager import rescale_daily_exposure
+    pick = BetEvaluation(
+        game_id="g", market="moneyline", selection="A", odds=2.0, model_prob=0.55, market_fair_prob=0.5,
+        final_prob=0.52, market_implied_prob=0.5, edge=0.02, ev_percent=4.0, raw_kelly=0.03,
+        quarter_kelly=fraction, recommended_stake_fraction=fraction, recommended_stake_amount=fraction * 1000.0,
+        is_approved=True,
+    )
+    amount = rescale_daily_exposure([pick], bankroll=1000.0)[0].recommended_stake_amount
+    assert amount == expected
+    assert amount == int(amount)

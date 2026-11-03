@@ -211,13 +211,13 @@ def test_send_settlement_report_output(monkeypatch):
         is_preseason=True,
     )
 
-    assert len(sent_messages) == 1
-    msg = sent_messages[0]
-    assert "CORE QUANT" in msg
-    assert "SOÑADORA" in msg
-    assert "BALANCE TOTAL DEL DÍA" in msg
-    assert "Core Quant Acumulado" in msg
-    assert "Soñadora Acumulado" in msg
+    assert len(sent_messages) == 2
+    core_msg, sat_msg = sent_messages
+    assert "CORE QUANT" in core_msg and "Core Quant Acumulado" in core_msg
+    assert "SOÑADORA" not in core_msg and "PARLAY_4LEG" not in core_msg
+    assert "SOÑADORA" in sat_msg and "Soñadora Acumulado" in sat_msg
+    assert "Warriors ML" not in sat_msg
+    assert all("BALANCE" not in m and "Global" not in m for m in sent_messages)
 
 
 def test_run_pipeline_sentinel_skips_duplicate_run(tmp_path, monkeypatch):
